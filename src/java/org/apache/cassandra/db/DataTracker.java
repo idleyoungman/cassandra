@@ -587,7 +587,7 @@ public class DataTracker
 
         private SSTableIntervalTree(Collection<Interval<RowPosition, SSTableReader>> intervals)
         {
-            super(intervals, null);
+            super(intervals);
         }
 
         public static SSTableIntervalTree empty()
