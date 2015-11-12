@@ -42,6 +42,7 @@ public class CFPropDefs extends PropertyDefinitions
     public static final String KW_DEFAULT_TIME_TO_LIVE = "default_time_to_live";
     public static final String KW_MIN_INDEX_INTERVAL = "min_index_interval";
     public static final String KW_MAX_INDEX_INTERVAL = "max_index_interval";
+    public static final String KW_HINT_TIME_TO_LIVE_SECONDS = "hint_time_to_live_seconds";
     public static final String KW_SPECULATIVE_RETRY = "speculative_retry";
     public static final String KW_BF_FP_CHANCE = "bloom_filter_fp_chance";
     public static final String KW_MEMTABLE_FLUSH_PERIOD = "memtable_flush_period_in_ms";
@@ -64,6 +65,7 @@ public class CFPropDefs extends PropertyDefinitions
         keywords.add(KW_DEFAULT_TIME_TO_LIVE);
         keywords.add(KW_MIN_INDEX_INTERVAL);
         keywords.add(KW_MAX_INDEX_INTERVAL);
+        keywords.add(KW_HINT_TIME_TO_LIVE_SECONDS);
         keywords.add(KW_SPECULATIVE_RETRY);
         keywords.add(KW_BF_FP_CHANCE);
         keywords.add(KW_COMPACTION);
@@ -189,6 +191,7 @@ public class CFPropDefs extends PropertyDefinitions
         cfm.memtableFlushPeriod(getInt(KW_MEMTABLE_FLUSH_PERIOD, cfm.getMemtableFlushPeriod()));
         cfm.minIndexInterval(getInt(KW_MIN_INDEX_INTERVAL, cfm.getMinIndexInterval()));
         cfm.maxIndexInterval(getInt(KW_MAX_INDEX_INTERVAL, cfm.getMaxIndexInterval()));
+        cfm.hintTimeToLiveSeconds(getInt(KW_HINT_TIME_TO_LIVE_SECONDS, cfm.getHintTimeToLiveSeconds()));
 
         if (compactionStrategyClass != null)
         {
