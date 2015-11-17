@@ -983,10 +983,15 @@ public class StorageProxy implements StorageProxyMBean
     public static void writeHintForMutation(Mutation mutation, long now, int ttl, InetAddress target)
     {
         assert ttl > 0;
+
         UUID hostId = StorageService.instance.getTokenMetadata().getHostId(target);
-        assert hostId != null : "Missing host ID for " + target.getHostAddress();
-        HintedHandOffManager.instance.hintFor(mutation, now, ttl, hostId).apply();
-        StorageMetrics.totalHints.inc();
+        if (hostId != null)
+        {
+            HintedHandOffManager.instance.hintFor(mutation, now, ttl, Pair.create(target, hostId)).apply();
+            StorageMetrics.totalHints.inc();
+        }
+        else
+            logger.debug("Discarding hint for endpoint not part of ring: {}", target);
     }
 
     private static void sendMessagesToNonlocalDC(MessageOut<? extends IMutation> message, Collection<InetAddress> targets, AbstractWriteResponseHandler handler)
@@ -1567,7 +1572,7 @@ public class StorageProxy implements StorageProxyMBean
                 {
                     // use our own mean column count as our estimate for how many matching rows each node will have
                     SecondaryIndex highestSelectivityIndex = searcher.highestSelectivityIndex(command.rowFilter);
-                    resultRowsPerRange = Math.min(resultRowsPerRange, highestSelectivityIndex.estimateResultRows());
+                    resultRowsPerRange = highestSelectivityIndex == null ? resultRowsPerRange : Math.min(resultRowsPerRange, highestSelectivityIndex.estimateResultRows());
                 }
             }
         }
