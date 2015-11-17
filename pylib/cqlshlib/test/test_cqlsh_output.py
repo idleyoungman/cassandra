@@ -523,26 +523,26 @@ class TestCqlshOutput(BaseTestCase):
 
     def test_prompt(self):
         with testrun_cqlsh(tty=True, keyspace=None, cqlver=cqlsh.DEFAULT_CQLVER) as c:
-            self.assertEqual(c.output_header.splitlines()[-1], 'cqlsh> ')
+            self.assertTrue(c.output_header.splitlines()[-1].endswith('cqlsh> '))
 
             c.send('\n')
             output = c.read_to_next_prompt().replace('\r\n', '\n')
-            self.assertEqual(output, '\ncqlsh> ')
+            self.assertTrue(output.endswith('cqlsh> '))
 
             cmd = "USE \"%s\";\n" % get_test_keyspace().replace('"', '""')
             c.send(cmd)
             output = c.read_to_next_prompt().replace('\r\n', '\n')
-            self.assertEqual(output, '%scqlsh:%s> ' % (cmd, get_test_keyspace()))
+            self.assertTrue(output.endswith('cqlsh:%s> ' % (get_test_keyspace())))
 
             c.send('use system;\n')
             output = c.read_to_next_prompt().replace('\r\n', '\n')
-            self.assertEqual(output, 'use system;\ncqlsh:system> ')
+            self.assertTrue(output.endswith('cqlsh:system> '))
 
             c.send('use NONEXISTENTKEYSPACE;\n')
             outputlines = c.read_to_next_prompt().splitlines()
 
             self.assertEqual(outputlines[0], 'use NONEXISTENTKEYSPACE;')
-            self.assertEqual(outputlines[2], 'cqlsh:system> ')
+            self.assertTrue(outputlines[2].endswith('cqlsh:system> '))
             midline = ColoredText(outputlines[1])
             self.assertEqual(midline.plain(),
                              'InvalidRequest: code=2200 [Invalid query] message="Keyspace \'nonexistentkeyspace\' does not exist"')
@@ -610,11 +610,10 @@ class TestCqlshOutput(BaseTestCase):
                 varcharcol text,
                 varintcol varint
             ) WITH bloom_filter_fp_chance = 0.01
-                AND caching = {'keys': 'ALL', 'rows_per_partition': 'NONE'}
+                AND caching = '{"keys":"ALL", "rows_per_partition":"NONE"}'
                 AND comment = ''
-                AND compaction = {'class': 'org.apache.cassandra.db.compaction.SizeTieredCompactionStrategy', 'max_threshold': '32', 'min_threshold': '4'}
-                AND compression = {'chunk_length_in_kb': '64', 'class': 'org.apache.cassandra.io.compress.LZ4Compressor'}
-                AND crc_check_chance = 1.0
+                AND compaction = {'class': 'org.apache.cassandra.db.compaction.SizeTieredCompactionStrategy'}
+                AND compression = {'sstable_compression': 'org.apache.cassandra.io.compress.LZ4Compressor'}
                 AND dclocal_read_repair_chance = 0.1
                 AND default_time_to_live = 0
                 AND gc_grace_seconds = 864000
@@ -622,7 +621,7 @@ class TestCqlshOutput(BaseTestCase):
                 AND memtable_flush_period_in_ms = 0
                 AND min_index_interval = 128
                 AND read_repair_chance = 0.0
-                AND speculative_retry = '99PERCENTILE';
+                AND speculative_retry = '99.0PERCENTILE';
 
         """ % quote_name(get_test_keyspace()))
 

@@ -13,6 +13,30 @@ restore snapshots created with the previous major version using the
 'sstableloader' tool. You can upgrade the file format of your snapshots
 using the provided 'sstableupgrade' tool.
 
+2.2.4
+=====
+
+Deprecation
+-----------
+    - Pig support has been deprecated, and will be removed in 3.0.
+      Please see CASSANDRA-10542 for more details.
+    - Configuration parameter memory_allocator in cassandra.yaml has been deprecated
+      and will be removed in 3.0.0. As mentioned below for 2.2.0, jemalloc is
+      automatically preloaded on Unix platforms.
+
+Operations
+----------
+    - Switching racks is no longer an allowed operation on a node which has
+      data. Instead, the node will need to be decommissioned and rebootstrapped.
+      If moving from the SimpleSnitch, make sure the rack containing all current
+      nodes is named "rack1".
+
+New features
+------------
+    - Native protocol server now allows both SSL and non-SSL connections on
+      the same port.
+
+
 2.2.3
 =====
 
@@ -20,6 +44,7 @@ Upgrading
 ---------
     - Nothing specific to this release, but please see 2.2 if you are upgrading
       from a previous version.
+
 
 2.2.2
 =====

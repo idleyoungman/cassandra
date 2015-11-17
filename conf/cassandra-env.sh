@@ -160,53 +160,6 @@ then
     export MALLOC_ARENA_MAX=4
 fi
 
-# Cassandra uses an installed jemalloc via LD_PRELOAD / DYLD_INSERT_LIBRARIES by default to improve off-heap
-# memory allocation performance. The following code searches for an installed libjemalloc.dylib/.so/.1.so using
-# Linux and OS-X specific approaches.
-# To specify your own libjemalloc in a different path, configure the fully qualified path in CASSANDRA_LIBJEMALLOC.
-# To disable jemalloc at all set CASSANDRA_LIBJEMALLOC=-
-#
-#CASSANDRA_LIBJEMALLOC=
-#
-find_library()
-{
-    pattern=$1
-    path=$(echo ${2} | tr ":" " ")
-
-    find $path -regex "$pattern" -print 2>/dev/null | head -n 1
-}
-case "`uname -s`" in
-    Linux)
-        if [ -z $CASSANDRA_LIBJEMALLOC ] ; then
-            which ldconfig > /dev/null 2>&1
-            if [ $? = 0 ] ; then
-                # e.g. for CentOS
-                dirs="/lib64 /lib /usr/lib64 /usr/lib `ldconfig -v 2>/dev/null | grep -v ^$'\t' | sed 's/^\([^:]*\):.*$/\1/'`"
-            else
-                # e.g. for Debian, OpenSUSE
-                dirs="/lib64 /lib /usr/lib64 /usr/lib `cat /etc/ld.so.conf /etc/ld.so.conf.d/*.conf | grep '^/'`"
-            fi
-            dirs=`echo $dirs | tr " " ":"`
-            CASSANDRA_LIBJEMALLOC=$(find_library '.*/libjemalloc\.so\(\.1\)*' $dirs)
-        fi
-        if [ ! -z $CASSANDRA_LIBJEMALLOC ] ; then
-            if [ "-" != "$CASSANDRA_LIBJEMALLOC" ] ; then
-                export LD_PRELOAD=$CASSANDRA_LIBJEMALLOC
-            fi
-        fi
-    ;;
-    Darwin)
-        if [ -z $CASSANDRA_LIBJEMALLOC ] ; then
-            CASSANDRA_LIBJEMALLOC=$(find_library '.*/libjemalloc\.dylib' $DYLD_LIBRARY_PATH:${DYLD_FALLBACK_LIBRARY_PATH-$HOME/lib:/usr/local/lib:/lib:/usr/lib})
-        fi
-        if [ ! -z $CASSANDRA_LIBJEMALLOC ] ; then
-            if [ "-" != "$CASSANDRA_LIBJEMALLOC" ] ; then
-                export DYLD_INSERT_LIBRARIES=$CASSANDRA_LIBJEMALLOC
-            fi
-        fi
-    ;;
-esac
-
 
 # Specifies the default port over which Cassandra will be available for
 # JMX connections.
@@ -294,11 +247,6 @@ fi
 # JVM_OPTS="$JVM_OPTS -XX:+UseGCLogFileRotation"
 # JVM_OPTS="$JVM_OPTS -XX:NumberOfGCLogFiles=10"
 # JVM_OPTS="$JVM_OPTS -XX:GCLogFileSize=10M"
-
-# Configure the following for JEMallocAllocator and if jemalloc is not available in the system 
-# library path (Example: /usr/local/lib/). Usually "make install" will do the right thing. 
-# export LD_LIBRARY_PATH=<JEMALLOC_HOME>/lib/
-# JVM_OPTS="$JVM_OPTS -Djava.library.path=<JEMALLOC_HOME>/lib/"
 
 # uncomment to have Cassandra JVM listen for remote debuggers/profilers on port 1414
 # JVM_OPTS="$JVM_OPTS -agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=1414"

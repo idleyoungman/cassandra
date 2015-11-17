@@ -27,7 +27,6 @@ import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.rmi.server.RMIClientSocketFactory;
 import java.rmi.server.RMISocketFactory;
-import java.text.SimpleDateFormat;
 import java.util.AbstractMap;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -522,7 +521,7 @@ public class NodeProbe implements AutoCloseable
 
     /**
      * Take a snapshot of all column family from different keyspaces.
-     * 
+     *
      * @param snapshotName
      *            the name of the snapshot.
      * @param columnFamilyList
@@ -857,6 +856,18 @@ public class NodeProbe implements AutoCloseable
         catch (ExecutionException | InterruptedException e)
         {
             throw new RuntimeException("Error while executing truncate hints", e);
+        }
+    }
+
+    public void refreshSizeEstimates()
+    {
+        try
+        {
+            ssProxy.refreshSizeEstimates();
+        }
+        catch (ExecutionException e)
+        {
+            throw new RuntimeException("Error while refreshing system.size_estimates", e);
         }
     }
 
@@ -1275,6 +1286,18 @@ public class NodeProbe implements AutoCloseable
             {
                 out.println("Exception occurred during clean-up. " + e);
             }
+        }
+    }
+
+    public TabularData getFailureDetectorPhilValues()
+    {
+        try
+        {
+            return fdProxy.getPhiValues();
+        }
+        catch (OpenDataException e)
+        {
+            throw new RuntimeException(e);
         }
     }
 }

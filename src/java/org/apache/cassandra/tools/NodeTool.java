@@ -129,7 +129,9 @@ public class NodeTool
                 TpStats.class,
                 TopPartitions.class,
                 SetLoggingLevel.class,
-                GetLoggingLevels.class
+                GetLoggingLevels.class,
+                FailureDetectorInfo.class,
+                RefreshSizeEstimates.class
         );
 
         Cli.CliBuilder<Runnable> builder = Cli.builder("nodetool");

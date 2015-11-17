@@ -15,31 +15,19 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.cassandra.gms;
 
-import java.net.UnknownHostException;
-import java.util.Map;
+package org.apache.cassandra.tools.nodetool;
 
-import javax.management.openmbean.OpenDataException;
-import javax.management.openmbean.TabularData;
+import io.airlift.command.Command;
+import org.apache.cassandra.tools.NodeProbe;
+import org.apache.cassandra.tools.NodeTool;
 
-public interface FailureDetectorMBean
+@Command(name = "refreshsizeestimates", description = "Refresh system.size_estimates")
+public class RefreshSizeEstimates extends NodeTool.NodeToolCmd
 {
-    public void dumpInterArrivalTimes();
-
-    public void setPhiConvictThreshold(double phi);
-
-    public double getPhiConvictThreshold();
-
-    public String getAllEndpointStates();
-
-    public String getEndpointState(String address) throws UnknownHostException;
-
-    public Map<String, String> getSimpleStates();
-
-    public int getDownEndpointCount();
-
-    public int getUpEndpointCount();
-
-    public TabularData getPhiValues() throws OpenDataException;
+    @Override
+    public void execute(NodeProbe probe)
+    {
+        probe.refreshSizeEstimates();
+    }
 }

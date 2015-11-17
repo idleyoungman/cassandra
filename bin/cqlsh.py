@@ -51,6 +51,9 @@ from glob import glob
 from StringIO import StringIO
 from uuid import UUID
 
+if sys.version_info[0] != 2 or sys.version_info[1] != 7:
+    sys.exit("\nCQL Shell supports only Python 2.7\n")
+
 description = "CQL Shell for Apache Cassandra"
 version = "5.0.1"
 
@@ -108,13 +111,13 @@ except ImportError, e:
              'Error: %s\n' % (sys.executable, sys.path, e))
 
 from cassandra.auth import PlainTextAuthProvider
-from cassandra.cluster import Cluster, PagedResult
+from cassandra.cluster import Cluster
 from cassandra.metadata import (ColumnMetadata, KeyspaceMetadata,
                                 TableMetadata, protect_name, protect_names,
                                 protect_value)
 from cassandra.policies import WhiteListRoundRobinPolicy
 from cassandra.protocol import QueryMessage, ResultMessage
-from cassandra.query import SimpleStatement, ordered_dict_factory
+from cassandra.query import SimpleStatement, ordered_dict_factory, TraceUnavailable
 
 # cqlsh should run correctly when run out of a Cassandra source tree,
 # out of an unpacked Cassandra tarball, and after a proper package install.
@@ -336,10 +339,11 @@ cqlsh_extra_syntax_rules = r'''
                          ( "WITH" <copyOption> ( "AND" <copyOption> )* )?
                 ;
 
-<copyOption> ::= [optnames]=<identifier> "=" [optvals]=<copyOptionVal>
+<copyOption> ::= [optnames]=(<identifier>|<reserved_identifier>) "=" [optvals]=<copyOptionVal>
                ;
 
 <copyOptionVal> ::= <identifier>
+                  | <reserved_identifier>
                   | <stringLiteral>
                   ;
 
@@ -421,7 +425,7 @@ def complete_copy_column_names(ctxt, cqlsh):
     return set(colnames[1:]) - set(existcols)
 
 
-COPY_OPTIONS = ('DELIMITER', 'QUOTE', 'ESCAPE', 'HEADER', 'ENCODING', 'NULL')
+COPY_OPTIONS = ('DELIMITER', 'QUOTE', 'ESCAPE', 'HEADER', 'ENCODING', 'TIMEFORMAT', 'NULL')
 
 
 @cqlsh_syntax_completer('copyOption', 'optnames')
@@ -431,6 +435,7 @@ def complete_copy_options(ctxt, cqlsh):
     opts = set(COPY_OPTIONS) - set(optnames)
     if direction == 'FROM':
         opts -= ('ENCODING',)
+        opts -= ('TIMEFORMAT',)
     return opts
 
 
@@ -670,6 +675,7 @@ class Shell(cmd.Cmd):
 
         self.session.default_timeout = client_timeout
         self.session.row_factory = ordered_dict_factory
+        self.session.default_consistency_level = cassandra.ConsistencyLevel.ONE
         self.get_connection_versions()
 
         self.current_keyspace = keyspace
@@ -772,8 +778,8 @@ class Shell(cmd.Cmd):
         vers['cql'] = self.cql_version
         print "[cqlsh %(shver)s | Cassandra %(build)s | CQL spec %(cql)s | Native protocol v%(protocol)s]" % vers
 
-    def show_session(self, sessionid):
-        print_trace_session(self, self.session, sessionid)
+    def show_session(self, sessionid, partial_session=False):
+        print_trace_session(self, self.session, sessionid, partial_session)
 
     def get_connection_versions(self):
         result, = self.session.execute("select * from system.local where key = 'local'")
@@ -1116,8 +1122,8 @@ class Shell(cmd.Cmd):
 
     def do_use(self, parsed):
         ksname = parsed.get_binding('ksname')
-        result, future = self.perform_simple_statement(SimpleStatement(parsed.extract_orig()))
-        if result:
+        success, _ = self.perform_simple_statement(SimpleStatement(parsed.extract_orig()))
+        if success:
             if ksname[0] == '"' and ksname[-1] == '"':
                 self.current_keyspace = self.cql_unprotect_name(ksname)
             else:
@@ -1134,7 +1140,7 @@ class Shell(cmd.Cmd):
 
     def perform_statement(self, statement):
         stmt = SimpleStatement(statement, consistency_level=self.consistency_level, serial_consistency_level=self.serial_consistency_level, fetch_size=self.page_size if self.use_paging else None)
-        result, future = self.perform_simple_statement(stmt)
+        success, future = self.perform_simple_statement(stmt)
 
         if future:
             if future.warnings:
@@ -1142,16 +1148,17 @@ class Shell(cmd.Cmd):
 
             if self.tracing_enabled:
                 try:
-                    trace = future.get_query_trace(self.max_trace_wait)
-                    if trace:
+                    for trace in future.get_all_query_traces(self.max_trace_wait):
                         print_trace(self, trace)
-                    else:
-                        msg = "Statement trace did not complete within %d seconds" % (self.session.max_trace_wait)
-                        self.writeresult(msg, color=RED)
+                except TraceUnavailable:
+                    msg = "Statement trace did not complete within %d seconds; trace data may be incomplete." % (self.session.max_trace_wait,)
+                    self.writeresult(msg, color=RED)
+                    for trace_id in future.get_query_trace_ids():
+                        self.show_session(trace_id, partial_session=True)
                 except Exception, err:
                     self.printerr("Unable to fetch query trace: %s" % (str(err),))
 
-        return result
+        return success
 
     def parse_for_table_meta(self, query_string):
         try:
@@ -1169,7 +1176,7 @@ class Shell(cmd.Cmd):
         while True:
             try:
                 future = self.session.execute_async(statement, trace=self.tracing_enabled)
-                rows = future.result(self.session.default_timeout)
+                result = future.result()
                 break
             except cassandra.OperationTimedOut, err:
                 self.refresh_schema_metadata_best_effort()
@@ -1184,42 +1191,36 @@ class Shell(cmd.Cmd):
                 return False, None
 
         if statement.query_string[:6].lower() == 'select':
-            self.print_result(rows, self.parse_for_table_meta(statement.query_string))
+            self.print_result(result, self.parse_for_table_meta(statement.query_string))
         elif statement.query_string.lower().startswith("list users") or statement.query_string.lower().startswith("list roles"):
-            self.print_result(rows, self.get_table_meta('system_auth', 'roles'))
+            self.print_result(result, self.get_table_meta('system_auth', 'roles'))
         elif statement.query_string.lower().startswith("list"):
-            self.print_result(rows, self.get_table_meta('system_auth', 'role_permissions'))
-        elif rows:
+            self.print_result(result, self.get_table_meta('system_auth', 'role_permissions'))
+        elif result:
             # CAS INSERT/UPDATE
             self.writeresult("")
-            self.print_static_result(rows, self.parse_for_table_meta(statement.query_string))
+            self.print_static_result(list(result), self.parse_for_table_meta(statement.query_string))
         self.flush_output()
         return True, future
 
-    def print_result(self, rows, table_meta):
+    def print_result(self, result, table_meta):
         self.decoding_errors = []
 
         self.writeresult("")
-        if isinstance(rows, PagedResult) and self.tty:
+        if result.has_more_pages and self.tty:
             num_rows = 0
             while True:
-                page = list(rows.current_response)
-                if not page:
-                    break
-                num_rows += len(page)
-                self.print_static_result(page, table_meta)
-                if not rows.response_future.has_more_pages:
-                    break
-                raw_input("---MORE---")
-
-                rows.response_future.start_fetching_next_page()
-                result = rows.response_future.result()
-                if rows.response_future.has_more_pages:
-                    rows.current_response = result.current_response
+                page = result.current_rows
+                if page:
+                    num_rows += len(page)
+                    self.print_static_result(page, table_meta)
+                if result.has_more_pages:
+                    raw_input("---MORE---")
+                    result.fetch_next_page()
                 else:
-                    rows.current_response = iter(result)
+                    break
         else:
-            rows = list(rows or [])
+            rows = list(result)
             num_rows = len(rows)
             self.print_static_result(rows, table_meta)
         self.writeresult("(%d rows)" % num_rows)
@@ -1672,12 +1673,14 @@ class Shell(cmd.Cmd):
 
         Available options and defaults:
 
-          DELIMITER=','    - character that appears between records
-          QUOTE='"'        - quoting character to be used to quote fields
-          ESCAPE='\'       - character to appear before the QUOTE char when quoted
-          HEADER=false     - whether to ignore the first line
-          NULL=''          - string that represents a null value
-          ENCODING='utf8'  - encoding for CSV output (COPY TO only)
+          DELIMITER=','           - character that appears between records
+          QUOTE='"'               - quoting character to be used to quote fields
+          ESCAPE='\'              - character to appear before the QUOTE char when quoted
+          HEADER=false            - whether to ignore the first line
+          NULL=''                 - string that represents a null value
+          ENCODING='utf8'         - encoding for CSV output (COPY TO only)
+          TIMEFORMAT=             - timestamp strftime format (COPY TO only)
+            '%Y-%m-%d %H:%M:%S%z'   defaults to time_format value in cqlshrc
 
         When entering CSV data on STDIN, you can use the sequence "\."
         on a line by itself to end the data input.
@@ -1851,6 +1854,7 @@ class Shell(cmd.Cmd):
 
     def perform_csv_export(self, ks, cf, columns, fname, opts):
         dialect_options = self.csv_dialect_defaults.copy()
+
         if 'quote' in opts:
             dialect_options['quotechar'] = opts.pop('quote')
         if 'escape' in opts:
@@ -1860,6 +1864,7 @@ class Shell(cmd.Cmd):
         encoding = opts.pop('encoding', 'utf8')
         nullval = opts.pop('null', '')
         header = bool(opts.pop('header', '').lower() == 'true')
+        timestamp_format = opts.pop('timeformat', self.display_timestamp_format)
         if dialect_options['quotechar'] == dialect_options['escapechar']:
             dialect_options['doublequote'] = True
             del dialect_options['escapechar']
@@ -1882,7 +1887,7 @@ class Shell(cmd.Cmd):
 
         meter = RateMeter(10000)
         try:
-            dtformats = DateTimeFormat(self.display_timestamp_format, self.display_date_format, self.display_nanotime_format)
+            dtformats = DateTimeFormat(timestamp_format, self.display_date_format, self.display_nanotime_format)
             dump = self.prep_export_dump(ks, cf, columns)
             writer = csv.writer(csvdest, **dialect_options)
             if header:
@@ -2323,7 +2328,7 @@ class ImportProcess(multiprocessing.Process):
         cqltypes = [table_meta.columns[name].typestring for name in self.columns]
         pk_indexes = [self.columns.index(col.name) for col in table_meta.primary_key]
         query = 'INSERT INTO %s.%s (%s) VALUES (%%s)' % (
-            protect_name(table_meta.keyspace.name),
+            protect_name(table_meta.keyspace_name),
             protect_name(table_meta.name),
             ', '.join(protect_names(self.columns)))
 
