@@ -15,22 +15,23 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.cassandra.io.sstable;
 
-import java.io.File;
+package org.apache.cassandra.cql3.validation.operations;
 
-public class CorruptSSTableException extends RuntimeException
+import org.junit.Test;
+
+import org.apache.cassandra.cql3.CQLTester;
+
+public class DropTest extends CQLTester
 {
-    public final File path;
-
-    public CorruptSSTableException(Exception cause, File path)
+    @Test
+    public void testNonExistingOnes() throws Throwable
     {
-        super("Corrupted: " + path, cause);
-        this.path = path;
+        assertInvalidMessage("Cannot drop non existing column family", "DROP TABLE " + KEYSPACE + ".table_does_not_exist");
+        assertInvalidMessage("Cannot drop non existing column family", "DROP TABLE keyspace_does_not_exist.table_does_not_exist");
+
+        execute("DROP TABLE IF EXISTS " + KEYSPACE + ".table_does_not_exist");
+        execute("DROP TABLE IF EXISTS keyspace_does_not_exist.table_does_not_exist");
     }
 
-    public CorruptSSTableException(Exception cause, String path)
-    {
-        this(cause, new File(path));
-    }
 }
