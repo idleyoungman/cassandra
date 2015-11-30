@@ -34,15 +34,20 @@ import org.junit.Assert;
 import org.junit.BeforeClass;
 import org.junit.Test;
 
-import com.datastax.driver.core.*;
+import com.datastax.driver.core.DataType;
+import com.datastax.driver.core.Row;
+import com.datastax.driver.core.TupleType;
+import com.datastax.driver.core.TupleValue;
+import com.datastax.driver.core.UDTValue;
 import com.datastax.driver.core.exceptions.InvalidQueryException;
 import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.cql3.CQL3Type;
+import org.apache.cassandra.cql3.CQLTester;
 import org.apache.cassandra.cql3.QueryProcessor;
 import org.apache.cassandra.cql3.UntypedResultSet;
 import org.apache.cassandra.cql3.functions.FunctionName;
 import org.apache.cassandra.cql3.functions.Functions;
 import org.apache.cassandra.cql3.functions.UDFunction;
-import org.apache.cassandra.cql3.CQLTester;
 import org.apache.cassandra.db.marshal.CollectionType;
 import org.apache.cassandra.dht.ByteOrderedPartitioner;
 import org.apache.cassandra.exceptions.FunctionExecutionException;
@@ -60,6 +65,20 @@ public class UFTest extends CQLTester
     public static void setUp()
     {
         DatabaseDescriptor.setPartitioner(ByteOrderedPartitioner.instance);
+    }
+
+    @Test
+    public void testNonExistingOnes() throws Throwable
+    {
+        assertInvalidMessage("Cannot drop non existing function", "DROP FUNCTION " + KEYSPACE + ".func_does_not_exist");
+        assertInvalidMessage("Cannot drop non existing function", "DROP FUNCTION " + KEYSPACE + ".func_does_not_exist(int,text)");
+        assertInvalidMessage("Cannot drop non existing function", "DROP FUNCTION keyspace_does_not_exist.func_does_not_exist");
+        assertInvalidMessage("Cannot drop non existing function", "DROP FUNCTION keyspace_does_not_exist.func_does_not_exist(int,text)");
+
+        execute("DROP FUNCTION IF EXISTS " + KEYSPACE + ".func_does_not_exist");
+        execute("DROP FUNCTION IF EXISTS " + KEYSPACE + ".func_does_not_exist(int,text)");
+        execute("DROP FUNCTION IF EXISTS keyspace_does_not_exist.func_does_not_exist");
+        execute("DROP FUNCTION IF EXISTS keyspace_does_not_exist.func_does_not_exist(int,text)");
     }
 
     @Test
@@ -2584,7 +2603,7 @@ public class UFTest extends CQLTester
                                          "LANGUAGE JAVA\n" +
                                          "AS 'return val;'");
 
-        String fNameICN = createFunction(KEYSPACE_PER_TEST, "blob",
+        String fNameICN = createFunction(KEYSPACE_PER_TEST, "int",
                                          "CREATE OR REPLACE FUNCTION %s(val int) " +
                                          "RETURNS NULL ON NULL INPUT " +
                                          "RETURNS int " +
@@ -2607,5 +2626,38 @@ public class UFTest extends CQLTester
         assertRows(execute("SELECT " + fNameIRN + "(empty_int) FROM %s"), row(new Object[]{null}));
         assertRows(execute("SELECT " + fNameICC + "(empty_int) FROM %s"), row(0));
         assertRows(execute("SELECT " + fNameICN + "(empty_int) FROM %s"), row(new Object[]{null}));
+    }
+
+    @Test
+    public void testAllNativeTypes() throws Throwable
+    {
+        StringBuilder sig = new StringBuilder();
+        StringBuilder args = new StringBuilder();
+        for (CQL3Type.Native type : CQL3Type.Native.values())
+        {
+            if (sig.length() > 0)
+                sig.append(',');
+            sig.append(type.toString());
+
+            if (args.length() > 0)
+                args.append(',');
+            args.append("arg").append(type.toString()).append(' ').append(type.toString());
+        }
+        createFunction(KEYSPACE, sig.toString(),
+                       "CREATE OR REPLACE FUNCTION %s(" + args + ") " +
+                       "RETURNS NULL ON NULL INPUT " +
+                       "RETURNS int " +
+                       "LANGUAGE JAVA\n" +
+                       "AS 'return 0;'");
+
+        for (CQL3Type.Native type : CQL3Type.Native.values())
+        {
+            createFunction(KEYSPACE_PER_TEST, type.toString(),
+                           "CREATE OR REPLACE FUNCTION %s(val " + type.toString() + ") " +
+                           "RETURNS NULL ON NULL INPUT " +
+                           "RETURNS int " +
+                           "LANGUAGE JAVA\n" +
+                           "AS 'return 0;'");
+        }
     }
 }

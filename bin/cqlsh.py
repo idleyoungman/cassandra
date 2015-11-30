@@ -37,7 +37,7 @@ import ConfigParser
 import csv
 import getpass
 import locale
-import multiprocessing
+import multiprocessing as mp
 import optparse
 import os
 import platform
@@ -45,6 +45,7 @@ import sys
 import time
 import traceback
 import warnings
+import webbrowser
 from contextlib import contextmanager
 from functools import partial
 from glob import glob
@@ -70,6 +71,31 @@ except ImportError:
 CQL_LIB_PREFIX = 'cassandra-driver-internal-only-'
 
 CASSANDRA_PATH = os.path.join(os.path.dirname(os.path.realpath(__file__)), '..')
+
+if os.path.exists(CASSANDRA_PATH + '/doc/cql3/CQL.html'):
+    # default location of local CQL.html
+    CASSANDRA_CQL_HTML = 'file://' + CASSANDRA_PATH + '/doc/cql3/CQL.html'
+elif os.path.exists('/usr/share/doc/cassandra/CQL.html'):
+    # fallback to package file
+    CASSANDRA_CQL_HTML = 'file:///usr/share/doc/cassandra/CQL.html'
+else:
+    # fallback to online version
+    CASSANDRA_CQL_HTML = 'https://cassandra.apache.org/doc/cql3/CQL-2.2.html'
+
+# On Linux, the Python webbrowser module uses the 'xdg-open' executable
+# to open a file/URL. But that only works, if the current session has been
+# opened from _within_ a desktop environment. I.e. 'xdg-open' will fail,
+# if the session's been opened via ssh to a remote box.
+#
+# Use 'python' to get some information about the detected browsers.
+# >>> import webbrowser
+# >>> webbrowser._tryorder
+# >>> webbrowser._browser
+#
+if webbrowser._tryorder[0] == 'xdg-open' and os.environ.get('XDG_DATA_DIRS', '') == '':
+    # only on Linux (some OS with xdg-open)
+    webbrowser._tryorder.remove('xdg-open')
+    webbrowser._tryorder.append('xdg-open')
 
 # use bundled libs for python-cql and thrift, if available. if there
 # is a ../lib dir, use bundled libs there preferentially.
@@ -125,7 +151,7 @@ cqlshlibdir = os.path.join(CASSANDRA_PATH, 'pylib')
 if os.path.isdir(cqlshlibdir):
     sys.path.insert(0, cqlshlibdir)
 
-from cqlshlib import cql3handling, cqlhandling, pylexotron, sslhandling
+from cqlshlib import cql3handling, cqlhandling, pylexotron, sslhandling, copy
 from cqlshlib.displaying import (ANSI_RESET, BLUE, COLUMN_NAME_COLORS, CYAN,
                                  RED, FormattedValue, colorme)
 from cqlshlib.formatting import (DEFAULT_DATE_FORMAT, DEFAULT_NANOTIME_FORMAT,
@@ -164,6 +190,9 @@ parser.add_option("-C", "--color", action='store_true', dest='color',
                   help='Always use color output')
 parser.add_option("--no-color", action='store_false', dest='color',
                   help='Never use color output')
+parser.add_option("--browser", dest='browser', help="""The browser to use to display CQL help, where BROWSER can be:
+                                                    - one of the supported browsers in https://docs.python.org/2/library/webbrowser.html.
+                                                    - browser path followed by %s, example: /usr/bin/google-chrome-stable %s""")
 parser.add_option('--ssl', action='store_true', help='Use SSL', default=False)
 parser.add_option("-u", "--username", help="Authenticate as user.")
 parser.add_option("-p", "--password", help="Authenticate using password.")
@@ -284,9 +313,9 @@ cqlsh_extra_syntax_rules = r'''
                    ;
 
 <describeCommand> ::= ( "DESCRIBE" | "DESC" )
-                                  ( "FUNCTIONS" ksname=<keyspaceName>?
+                                  ( "FUNCTIONS"
                                   | "FUNCTION" udf=<anyFunctionName>
-                                  | "AGGREGATES" ksname=<keyspaceName>?
+                                  | "AGGREGATES"
                                   | "AGGREGATE" uda=<userAggregateName>
                                   | "KEYSPACES"
                                   | "KEYSPACE" ksname=<keyspaceName>?
@@ -425,7 +454,8 @@ def complete_copy_column_names(ctxt, cqlsh):
     return set(colnames[1:]) - set(existcols)
 
 
-COPY_OPTIONS = ('DELIMITER', 'QUOTE', 'ESCAPE', 'HEADER', 'ENCODING', 'TIMEFORMAT', 'NULL')
+COPY_OPTIONS = ['DELIMITER', 'QUOTE', 'ESCAPE', 'HEADER', 'NULL', 'ENCODING',
+                'TIMEFORMAT', 'JOBS', 'PAGESIZE', 'PAGETIMEOUT', 'MAXATTEMPTS']
 
 
 @cqlsh_syntax_completer('copyOption', 'optnames')
@@ -434,8 +464,7 @@ def complete_copy_options(ctxt, cqlsh):
     direction = ctxt.get_binding('dir').upper()
     opts = set(COPY_OPTIONS) - set(optnames)
     if direction == 'FROM':
-        opts -= ('ENCODING',)
-        opts -= ('TIMEFORMAT',)
+        opts -= set(['ENCODING', 'TIMEFORMAT', 'JOBS', 'PAGESIZE', 'PAGETIMEOUT', 'MAXATTEMPTS'])
     return opts
 
 
@@ -558,6 +587,19 @@ def describe_interval(seconds):
     return words
 
 
+def insert_driver_hooks():
+    extend_cql_deserialization()
+    auto_format_udts()
+
+
+def extend_cql_deserialization():
+    """
+    The python driver returns BLOBs as string, but we expect them as bytearrays
+    """
+    cassandra.cqltypes.BytesType.deserialize = staticmethod(lambda byts, protocol_version: bytearray(byts))
+    cassandra.cqltypes.CassandraType.support_empty_values = True
+
+
 def auto_format_udts():
     # when we see a new user defined type, set up the shell formatting for it
     udt_apply_params = cassandra.cqltypes.UserType.apply_parameters
@@ -617,7 +659,7 @@ class Shell(cmd.Cmd):
 
     def __init__(self, hostname, port, color=False,
                  username=None, password=None, encoding=None, stdin=None, tty=True,
-                 completekey=DEFAULT_COMPLETEKEY, use_conn=None,
+                 completekey=DEFAULT_COMPLETEKEY, browser=None, use_conn=None,
                  cqlver=DEFAULT_CQLVER, keyspace=None,
                  tracing_enabled=False, expand_enabled=False,
                  display_nanotime_format=DEFAULT_NANOTIME_FORMAT,
@@ -661,6 +703,9 @@ class Shell(cmd.Cmd):
         else:
             self.session = self.conn.connect()
 
+        if browser == "":
+            browser = None
+        self.browser = browser
         self.color = color
 
         self.display_nanotime_format = display_nanotime_format
@@ -709,11 +754,6 @@ class Shell(cmd.Cmd):
         self.query_out = sys.stdout
         self.consistency_level = cassandra.ConsistencyLevel.ONE
         self.serial_consistency_level = cassandra.ConsistencyLevel.SERIAL
-        # the python driver returns BLOBs as string, but we expect them as bytearrays
-        cassandra.cqltypes.BytesType.deserialize = staticmethod(lambda byts, protocol_version: bytearray(byts))
-        cassandra.cqltypes.CassandraType.support_empty_values = True
-
-        auto_format_udts()
 
         self.empty_lines = 0
         self.statement_error = False
@@ -857,11 +897,9 @@ class Shell(cmd.Cmd):
     def get_keyspaces(self):
         return self.conn.metadata.keyspaces.values()
 
-    def get_ring(self):
-        if self.current_keyspace is None or self.current_keyspace == 'system':
-            raise NoKeyspaceError("Ring view requires a current non-system keyspace")
-        self.conn.metadata.token_map.rebuild_keyspace(self.current_keyspace, build_if_absent=True)
-        return self.conn.metadata.token_map.tokens_to_hosts_by_ks[self.current_keyspace]
+    def get_ring(self, ks):
+        self.conn.metadata.token_map.rebuild_keyspace(ks, build_if_absent=True)
+        return self.conn.metadata.token_map.tokens_to_hosts_by_ks[ks]
 
     def get_table_meta(self, ksname, tablename):
         if ksname is None:
@@ -1424,7 +1462,7 @@ class Shell(cmd.Cmd):
             cmd.Cmd.columnize(self, protect_names(self.get_columnfamily_names(ksname)))
             print
 
-    def describe_functions(self, ksname=None):
+    def describe_functions(self, ksname):
         print
         if ksname is None:
             for ksmeta in self.get_keyspaces():
@@ -1451,7 +1489,7 @@ class Shell(cmd.Cmd):
         print "\n\n".join(func.as_cql_query(formatted=True) for func in functions)
         print
 
-    def describe_aggregates(self, ksname=None):
+    def describe_aggregates(self, ksname):
         print
         if ksname is None:
             for ksmeta in self.get_keyspaces():
@@ -1515,7 +1553,7 @@ class Shell(cmd.Cmd):
         # print 'Snitch: %s\n' % snitch
         if self.current_keyspace is not None and self.current_keyspace != 'system':
             print "Range ownership:"
-            ring = self.get_ring()
+            ring = self.get_ring(self.current_keyspace)
             for entry in ring.items():
                 print ' %39s  [%s]' % (str(entry[0].value), ', '.join([host.address for host in entry[1]]))
             print
@@ -1534,7 +1572,7 @@ class Shell(cmd.Cmd):
         (DESC may be used as a shorthand.)
 
           Outputs information about the connected Cassandra cluster, or about
-          the data stored on it. Use in one of the following ways:
+          the data objects stored in the cluster. Use in one of the following ways:
 
         DESCRIBE KEYSPACES
 
@@ -1542,20 +1580,20 @@ class Shell(cmd.Cmd):
 
         DESCRIBE KEYSPACE [<keyspacename>]
 
-          Output CQL commands that could be used to recreate the given
-          keyspace, and the tables in it. In some cases, as the CQL interface
-          matures, there will be some metadata about a keyspace that is not
-          representable with CQL. That metadata will not be shown.
+          Output CQL commands that could be used to recreate the given keyspace,
+          and the objects in it (such as tables, types, functions, etc.).
+          In some cases, as the CQL interface matures, there will be some metadata
+          about a keyspace that is not representable with CQL. That metadata will not be shown.
 
-          The '<keyspacename>' argument may be omitted when using a non-system
-          keyspace; in that case, the current keyspace will be described.
+          The '<keyspacename>' argument may be omitted, in which case the current
+          keyspace will be described.
 
         DESCRIBE TABLES
 
           Output the names of all tables in the current keyspace, or in all
           keyspaces if there is no current keyspace.
 
-        DESCRIBE TABLE <tablename>
+        DESCRIBE TABLE [<keyspace>.]<tablename>
 
           Output CQL commands that could be used to recreate the given table.
           In some cases, as above, there may be table metadata which is not
@@ -1563,7 +1601,7 @@ class Shell(cmd.Cmd):
 
         DESCRIBE INDEX <indexname>
 
-          Output CQL commands that could be used to recreate the given index.
+          Output the CQL command that could be used to recreate the given index.
           In some cases, there may be index metadata which is not representable
           and which will not be shown.
 
@@ -1580,21 +1618,32 @@ class Shell(cmd.Cmd):
           Works as though "DESCRIBE KEYSPACE k" was invoked for each non-system keyspace
           k. Use DESCRIBE FULL SCHEMA to include the system keyspaces.
 
-        DESCRIBE FUNCTIONS <keyspace>
+        DESCRIBE TYPES
 
-          Output the names of all user defined functions in the given keyspace.
+          Output the names of all user-defined-types in the current keyspace, or in all
+          keyspaces if there is no current keyspace.
+
+        DESCRIBE TYPE [<keyspace>.]<type>
+
+          Output the CQL command that could be used to recreate the given user-defined-type.
+
+        DESCRIBE FUNCTIONS
+
+          Output the names of all user-defined-functions in the current keyspace, or in all
+          keyspaces if there is no current keyspace.
 
         DESCRIBE FUNCTION [<keyspace>.]<function>
 
-          Describe the given user defined function.
+          Output the CQL command that could be used to recreate the given user-defined-function.
 
-        DESCRIBE AGGREGATES <keyspace>
+        DESCRIBE AGGREGATES
 
-          Output the names of all user defined aggregates in the given keyspace.
+          Output the names of all user-defined-aggregates in the current keyspace, or in all
+          keyspaces if there is no current keyspace.
 
         DESCRIBE AGGREGATE [<keyspace>.]<aggregate>
 
-          Describe the given user defined aggregate.
+          Output the CQL command that could be used to recreate the given user-defined-aggregate.
 
         DESCRIBE <objname>
 
@@ -1603,15 +1652,13 @@ class Shell(cmd.Cmd):
   """
         what = parsed.matched[1][1].lower()
         if what == 'functions':
-            ksname = self.cql_unprotect_name(parsed.get_binding('ksname', None))
-            self.describe_functions(ksname)
+            self.describe_functions(self.current_keyspace)
         elif what == 'function':
             ksname = self.cql_unprotect_name(parsed.get_binding('ksname', None))
             functionname = self.cql_unprotect_name(parsed.get_binding('udfname'))
             self.describe_function(ksname, functionname)
         elif what == 'aggregates':
-            ksname = self.cql_unprotect_name(parsed.get_binding('ksname', None))
-            self.describe_aggregates(ksname)
+            self.describe_aggregates(self.current_keyspace)
         elif what == 'aggregate':
             ksname = self.cql_unprotect_name(parsed.get_binding('ksname', None))
             aggregatename = self.cql_unprotect_name(parsed.get_binding('udaname'))
@@ -1705,6 +1752,8 @@ class Shell(cmd.Cmd):
         cleancopyoptvals = [optval.decode('string-escape') for optval in copyoptvals]
         opts = dict(zip(copyoptnames, cleancopyoptvals))
 
+        print "\nStarting copy of %s.%s with columns %s." % (ks, cf, columns)
+
         timestart = time.time()
 
         direction = parsed.get_binding('dir').upper()
@@ -1721,22 +1770,12 @@ class Shell(cmd.Cmd):
         print "\n%d rows %s in %s." % (rows, verb, describe_interval(timeend - timestart))
 
     def perform_csv_import(self, ks, cf, columns, fname, opts):
-        dialect_options = self.csv_dialect_defaults.copy()
-        if 'quote' in opts:
-            dialect_options['quotechar'] = opts.pop('quote')
-        if 'escape' in opts:
-            dialect_options['escapechar'] = opts.pop('escape')
-        if 'delimiter' in opts:
-            dialect_options['delimiter'] = opts.pop('delimiter')
-        nullval = opts.pop('null', '')
-        header = bool(opts.pop('header', '').lower() == 'true')
-        if dialect_options['quotechar'] == dialect_options['escapechar']:
-            dialect_options['doublequote'] = True
-            del dialect_options['escapechar']
-        if opts:
+        csv_options, dialect_options, unrecognized_options = copy.parse_options(self, opts)
+        if unrecognized_options:
             self.printerr('Unrecognized COPY FROM options: %s'
-                          % ', '.join(opts.keys()))
+                          % ', '.join(unrecognized_options.keys()))
             return 0
+        nullval, header = csv_options['nullval'], csv_options['header']
 
         if fname is None:
             do_close = False
@@ -1751,34 +1790,23 @@ class Shell(cmd.Cmd):
                 return 0
 
         current_record = None
-
+        processes, pipes = [], [],
         try:
             if header:
                 linesource.next()
             reader = csv.reader(linesource, **dialect_options)
 
-            from multiprocessing import Pipe, cpu_count
+            num_processes = copy.get_num_processes(cap=4)
 
-            # Pick a resonable number of child processes. We need to leave at
-            # least one core for the parent process.  This doesn't necessarily
-            # need to be capped at 4, but it's currently enough to keep
-            # a single local Cassandra node busy, and I see lower throughput
-            # with more processes.
-            try:
-                num_processes = max(1, min(4, cpu_count() - 1))
-            except NotImplementedError:
-                num_processes = 1
-
-            processes, pipes = [], [],
             for i in range(num_processes):
-                parent_conn, child_conn = Pipe()
+                parent_conn, child_conn = mp.Pipe()
                 pipes.append(parent_conn)
                 processes.append(ImportProcess(self, child_conn, ks, cf, columns, nullval))
 
             for process in processes:
                 process.start()
 
-            meter = RateMeter(10000)
+            meter = copy.RateMeter(10000)
             for current_record, row in enumerate(reader, start=1):
                 # write to the child process
                 pipes[current_record % num_processes].send((current_record, row))
@@ -1788,7 +1816,7 @@ class Shell(cmd.Cmd):
 
                 # check for any errors reported by the children
                 if (current_record % 100) == 0:
-                    if self._check_child_pipes(current_record, pipes):
+                    if self._check_import_processes(current_record, pipes):
                         # no errors seen, continue with outer loop
                         continue
                     else:
@@ -1817,7 +1845,7 @@ class Shell(cmd.Cmd):
             for process in processes:
                 process.join()
 
-            self._check_child_pipes(current_record, pipes)
+            self._check_import_processes(current_record, pipes)
 
             for pipe in pipes:
                 pipe.close()
@@ -1829,8 +1857,7 @@ class Shell(cmd.Cmd):
 
         return current_record
 
-    def _check_child_pipes(self, current_record, pipes):
-        # check the pipes for errors from child processes
+    def _check_import_processes(self, current_record, pipes):
         for pipe in pipes:
             if pipe.poll():
                 try:
@@ -1853,63 +1880,13 @@ class Shell(cmd.Cmd):
         return True
 
     def perform_csv_export(self, ks, cf, columns, fname, opts):
-        dialect_options = self.csv_dialect_defaults.copy()
-
-        if 'quote' in opts:
-            dialect_options['quotechar'] = opts.pop('quote')
-        if 'escape' in opts:
-            dialect_options['escapechar'] = opts.pop('escape')
-        if 'delimiter' in opts:
-            dialect_options['delimiter'] = opts.pop('delimiter')
-        encoding = opts.pop('encoding', 'utf8')
-        nullval = opts.pop('null', '')
-        header = bool(opts.pop('header', '').lower() == 'true')
-        timestamp_format = opts.pop('timeformat', self.display_timestamp_format)
-        if dialect_options['quotechar'] == dialect_options['escapechar']:
-            dialect_options['doublequote'] = True
-            del dialect_options['escapechar']
-
-        if opts:
-            self.printerr('Unrecognized COPY TO options: %s'
-                          % ', '.join(opts.keys()))
+        csv_options, dialect_options, unrecognized_options = copy.parse_options(self, opts)
+        if unrecognized_options:
+            self.printerr('Unrecognized COPY TO options: %s' % ', '.join(unrecognized_options.keys()))
             return 0
 
-        if fname is None:
-            do_close = False
-            csvdest = sys.stdout
-        else:
-            do_close = True
-            try:
-                csvdest = open(fname, 'wb')
-            except IOError, e:
-                self.printerr("Can't open %r for writing: %s" % (fname, e))
-                return 0
-
-        meter = RateMeter(10000)
-        try:
-            dtformats = DateTimeFormat(timestamp_format, self.display_date_format, self.display_nanotime_format)
-            dump = self.prep_export_dump(ks, cf, columns)
-            writer = csv.writer(csvdest, **dialect_options)
-            if header:
-                writer.writerow(columns)
-            for row in dump:
-                fmt = lambda v: \
-                    format_value(v, output_encoding=encoding, nullval=nullval,
-                                 date_time_format=dtformats,
-                                 float_precision=self.display_float_precision).strval
-                writer.writerow(map(fmt, row.values()))
-                meter.increment()
-        finally:
-            if do_close:
-                csvdest.close()
-        return meter.current_record
-
-    def prep_export_dump(self, ks, cf, columns):
-        if columns is None:
-            columns = self.get_column_names(ks, cf)
-        columnlist = ', '.join(protect_names(columns))
-        query = 'SELECT %s FROM %s.%s' % (columnlist, protect_name(ks), protect_name(cf))
-        return self.session.execute(query)
+        return copy.ExportTask(self, ks, cf, columns, fname, csv_options, dialect_options,
+                               DEFAULT_PROTOCOL_VERSION, CONFIG_FILE).run()
 
     def do_show(self, parsed):
         """
@@ -2233,9 +2210,32 @@ class Shell(cmd.Cmd):
                 doc = getattr(self, 'do_' + t.lower()).__doc__
                 self.stdout.write(doc + "\n")
             elif t.lower() in cqldocs.get_help_topics():
-                cqldocs.print_help_topic(t)
+                urlpart = cqldocs.get_help_topic(t)
+                if urlpart is not None:
+                    url = "%s#%s" % (CASSANDRA_CQL_HTML, urlpart)
+                    if self.browser is not None:
+                        webbrowser.get(self.browser).open_new_tab(url)
+                    else:
+                        webbrowser.open_new_tab(url)
             else:
                 self.printerr("*** No help on %s" % (t,))
+
+    def do_unicode(self, parsed):
+        """
+        Textual input/output
+
+        When control characters, or other characters which can't be encoded
+        in your current locale, are found in values of 'text' or 'ascii'
+        types, it will be shown as a backslash escape. If color is enabled,
+        any such backslash escapes will be shown in a different color from
+        the surrounding text.
+
+        Unicode code points in your data will be output intact, if the
+        encoding for your locale is capable of decoding them. If you prefer
+        that non-ascii characters be shown with Python-style "\\uABCD"
+        escape sequences, invoke cqlsh with an ASCII locale (for example,
+        by setting the $LANG environment variable to "C").
+        """
 
     def do_paging(self, parsed):
         """
@@ -2286,10 +2286,10 @@ class Shell(cmd.Cmd):
         self.writeresult(text, color, newline=newline, out=sys.stderr)
 
 
-class ImportProcess(multiprocessing.Process):
+class ImportProcess(mp.Process):
 
     def __init__(self, parent, pipe, ks, cf, columns, nullval):
-        multiprocessing.Process.__init__(self)
+        mp.Process.__init__(self)
         self.pipe = pipe
         self.nullval = nullval
         self.ks = ks
@@ -2327,10 +2327,17 @@ class ImportProcess(multiprocessing.Process):
         pk_cols = [col.name for col in table_meta.primary_key]
         cqltypes = [table_meta.columns[name].typestring for name in self.columns]
         pk_indexes = [self.columns.index(col.name) for col in table_meta.primary_key]
-        query = 'INSERT INTO %s.%s (%s) VALUES (%%s)' % (
-            protect_name(table_meta.keyspace_name),
-            protect_name(table_meta.name),
-            ', '.join(protect_names(self.columns)))
+        is_counter_table = ("counter" in cqltypes)
+
+        if is_counter_table:
+            query = 'UPDATE %s.%s SET %%s WHERE %%s' % (
+                protect_name(table_meta.keyspace_name),
+                protect_name(table_meta.name))
+        else:
+            query = 'INSERT INTO %s.%s (%s) VALUES (%%s)' % (
+                protect_name(table_meta.keyspace_name),
+                protect_name(table_meta.name),
+                ', '.join(protect_names(self.columns)))
 
         # we need to handle some types specially
         should_escape = [t in ('ascii', 'text', 'timestamp', 'date', 'time', 'inet') for t in cqltypes]
@@ -2395,8 +2402,17 @@ class ImportProcess(multiprocessing.Process):
                         return
                     else:
                         row[i] = 'null'
-
-                full_query = query % (','.join(row),)
+                if is_counter_table:
+                    where_clause = []
+                    set_clause = []
+                    for i, value in enumerate(row):
+                        if i in pk_indexes:
+                            where_clause.append("%s=%s" % (self.columns[i], value))
+                        else:
+                            set_clause.append("%s=%s+%s" % (self.columns[i], self.columns[i], value))
+                    full_query = query % (','.join(set_clause), ' AND '.join(where_clause))
+                else:
+                    full_query = query % (','.join(row),)
                 query_message = QueryMessage(
                     full_query, self.consistency_level, serial_consistency_level=None,
                     fetch_size=None, paging_state=None, timestamp=insert_timestamp)
@@ -2563,6 +2579,7 @@ def read_options(cmdlineargs, environment):
     optvalues.username = option_with_default(configs.get, 'authentication', 'username')
     optvalues.password = option_with_default(rawconfigs.get, 'authentication', 'password')
     optvalues.keyspace = option_with_default(configs.get, 'authentication', 'keyspace')
+    optvalues.browser = option_with_default(configs.get, 'ui', 'browser', None)
     optvalues.completekey = option_with_default(configs.get, 'ui', 'completekey',
                                                 DEFAULT_COMPLETEKEY)
     optvalues.color = option_with_default(configs.getboolean, 'ui', 'color')
@@ -2703,6 +2720,7 @@ def main(options, hostname, port):
                       stdin=stdin,
                       tty=options.tty,
                       completekey=options.completekey,
+                      browser=options.browser,
                       cqlver=options.cqlversion,
                       keyspace=options.keyspace,
                       display_timestamp_format=options.time_format,
@@ -2730,6 +2748,9 @@ def main(options, hostname, port):
     if batch_mode and shell.statement_error:
         sys.exit(2)
 
+# always call this regardless of module name: when a sub-process is spawned
+# on Windows then the module name is not __main__, see CASSANDRA-9304
+insert_driver_hooks()
 
 if __name__ == '__main__':
     main(*read_options(sys.argv[1:], os.environ))

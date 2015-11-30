@@ -26,7 +26,6 @@ import java.util.Set;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.composites.CellName;
 import org.apache.cassandra.db.composites.CellNameType;
@@ -55,6 +54,9 @@ public class KeysSearcher extends SecondaryIndexSearcher
         assert filter.getClause() != null && !filter.getClause().isEmpty();
         final IndexExpression primary = highestSelectivityPredicate(filter.getClause(), true);
         final SecondaryIndex index = indexManager.getIndexForColumn(primary.column);
+        if (!index.isQueryable())
+            throw new IndexNotAvailableException(index.getIndexName());
+
         // TODO: this should perhaps not open and maintain a writeOp for the full duration, but instead only *try* to delete stale entries, without blocking if there's no room
         // as it stands, we open a writeOp and keep it open for the duration to ensure that should this CF get flushed to make room we don't block the reclamation of any room  being made
         try (OpOrder.Group writeOp = baseCfs.keyspace.writeOrder.start(); OpOrder.Group baseOp = baseCfs.readOrdering.start(); OpOrder.Group indexOp = index.getIndexCfs().readOrdering.start())
@@ -98,9 +100,8 @@ public class KeysSearcher extends SecondaryIndexSearcher
 
             protected Row computeNext()
             {
-                int meanColumns = Math.max(index.getIndexCfs().getMeanColumns(), 1);
                 // We shouldn't fetch only 1 row as this provides buggy paging in case the first row doesn't satisfy all clauses
-                int rowsPerQuery = Math.max(Math.min(filter.maxRows(), filter.maxColumns() / meanColumns), 2);
+                int rowsPerQuery = Math.max(Math.min(filter.maxRows(), filter.maxColumns()), 2);
                 while (true)
                 {
                     if (indexColumns == null || !indexColumns.hasNext())
