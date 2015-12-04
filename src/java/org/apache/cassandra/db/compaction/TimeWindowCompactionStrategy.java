@@ -21,6 +21,7 @@ package org.apache.cassandra.db.compaction;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.Iterator;
 import java.util.TreeSet;
 import java.util.concurrent.TimeUnit;
@@ -138,25 +139,39 @@ public class TimeWindowCompactionStrategy extends AbstractCompactionStrategy
 
     private List<SSTableReader> getNextNonExpiredSSTables(Iterable<SSTableReader> nonExpiringSSTables, final int gcBefore)
     {
-        List<SSTableReader> mostInteresting = getCompactionCandidates(nonExpiringSSTables);
-
-        if (mostInteresting != null)
-        {
-            return mostInteresting;
-        }
-
-        // if there is no sstable to compact in standard way, try compacting single sstable whose droppable tombstone
-        // ratio is greater than threshold.
+        // First get the a list of tables that could drop tombstones.
         List<SSTableReader> sstablesWithTombstones = new ArrayList<>();
         for (SSTableReader sstable : nonExpiringSSTables)
         {
             if (worthDroppingTombstones(sstable, gcBefore))
                 sstablesWithTombstones.add(sstable);
         }
-        if (sstablesWithTombstones.isEmpty())
-            return Collections.emptyList();
 
-        return Collections.singletonList(Collections.min(sstablesWithTombstones, SSTableReader.sizeComparator));
+        // If there are files that could be compacted because they reached their tombstone ratio, then clean them up.
+        // NOTE: You should set a the tombstone ratio and tombstone compaction interval high enough so you're not constantly compacting SSTables.
+        if(!sstablesWithTombstones.isEmpty())
+        {
+            // Compact the tables with the highest tombstone ratios first.
+            return Collections.singletonList(Collections.max(sstablesWithTombstones, new Comparator<SSTableReader>()
+            {
+                public int compare(SSTableReader o1, SSTableReader o2)
+                {
+                    return Double.compare(o1.getEstimatedDroppableTombstoneRatio(gcBefore), o2.getEstimatedDroppableTombstoneRatio(gcBefore));
+                }
+            }));
+        }
+
+        // Now check for the most interesting tables.
+        List<SSTableReader> mostInteresting = getCompactionCandidates(nonExpiringSSTables);
+
+        if (mostInteresting != null)
+        {
+            return mostInteresting;
+        }
+        else
+        {
+            return Collections.emptyList();
+        }
     }
 
     private List<SSTableReader> getCompactionCandidates(Iterable<SSTableReader> candidateSSTables)
