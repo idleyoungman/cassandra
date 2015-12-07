@@ -1026,18 +1026,6 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
         MigrationManager.instance.register(new AuthMigrationListener());
     }
 
-    private void maybeAddTable(CFMetaData cfm)
-    {
-        try
-        {
-            MigrationManager.announceNewColumnFamily(cfm);
-        }
-        catch (AlreadyExistsException e)
-        {
-            logger.debug("Attempted to create new table {}, but it already exists", cfm.cfName);
-        }
-    }
-
     private void maybeAddKeyspace(KSMetaData ksm)
     {
         try
@@ -1064,14 +1052,17 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
         // version of the schema, the one the node will be expecting.
 
         KSMetaData defined = Schema.instance.getKSMetaData(expected.name);
+        // If the keyspace doesn't exist, create it
         if (defined == null)
         {
-            // The keyspace doesn't exist, create it
             maybeAddKeyspace(expected);
-            return;
+            defined = Schema.instance.getKSMetaData(expected.name);
         }
 
         // While the keyspace exists, it might miss table or have outdated one
+        // There is also the potential for a race, as schema migrations add the bare
+        // keyspace into Schema.instance before adding its tables, so double check that
+        // all the expected tables are present
         for (CFMetaData expectedTable : expected.cfMetaData().values())
         {
             CFMetaData definedTable = defined.cfMetaData().get(expectedTable.cfName);
@@ -2475,18 +2466,18 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
 
     public List<String> getLiveNodes()
     {
-        return stringify(Gossiper.instance.getLiveEndpoints());
+        return stringify(Gossiper.instance.getLiveMembers());
     }
 
-    public Set<InetAddress> getLiveMembers()
+    public Set<InetAddress> getLiveRingMembers()
     {
-        return getLiveMembers(false);
+        return getLiveRingMembers(false);
     }
 
-    public Set<InetAddress> getLiveMembers(boolean excludeDeadStates)
+    public Set<InetAddress> getLiveRingMembers(boolean excludeDeadStates)
     {
         Set<InetAddress> ret = new HashSet<>();
-        for (InetAddress ep : Gossiper.instance.getLiveEndpoints())
+        for (InetAddress ep : Gossiper.instance.getLiveMembers())
         {
             if (excludeDeadStates)
             {
@@ -3795,7 +3786,7 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
         if (endpoint.equals(myAddress))
              throw new UnsupportedOperationException("Cannot remove self");
 
-        if (Gossiper.instance.getLiveEndpoints().contains(endpoint))
+        if (Gossiper.instance.getLiveMembers().contains(endpoint))
             throw new UnsupportedOperationException("Node " + endpoint + " is alive and owns this ID. Use decommission command to remove it from the ring");
 
         // A leaving endpoint that is dead is already being removed.
