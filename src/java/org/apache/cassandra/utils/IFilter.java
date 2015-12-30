@@ -25,6 +25,8 @@ public interface IFilter extends SharedCloseable
 {
     void add(ByteBuffer key);
 
+    boolean isPresent(long[] hashedKeyArray);
+
     boolean isPresent(ByteBuffer key);
 
     void clear();
