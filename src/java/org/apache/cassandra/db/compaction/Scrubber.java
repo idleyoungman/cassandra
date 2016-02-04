@@ -77,10 +77,10 @@ public class Scrubber implements Closeable
 
     public Scrubber(ColumnFamilyStore cfs, SSTableReader sstable, boolean skipCorrupted, boolean isOffline, boolean checkData) throws IOException
     {
-        this(cfs, sstable, skipCorrupted, new OutputHandler.LogOutput(), isOffline, checkData);
+        this(cfs, sstable, skipCorrupted, new OutputHandler.LogOutput(), isOffline, checkData, true);
     }
 
-    public Scrubber(ColumnFamilyStore cfs, SSTableReader sstable, boolean skipCorrupted, OutputHandler outputHandler, boolean isOffline, boolean checkData) throws IOException
+    public Scrubber(ColumnFamilyStore cfs, SSTableReader sstable, boolean skipCorrupted, OutputHandler outputHandler, boolean isOffline, boolean checkData, boolean dropTombstone) throws IOException
     {
         this.cfs = cfs;
         this.sstable = sstable;
@@ -97,9 +97,10 @@ public class Scrubber implements Closeable
             throw new IOException("disk full");
 
         // If we run scrub offline, we should never purge tombstone, as we cannot know if other sstable have data that the tombstone deletes.
-        this.controller = isOffline
-                        ? new ScrubController(cfs)
-                        : new CompactionController(cfs, Collections.singleton(sstable), CompactionManager.getDefaultGcBefore(cfs));
+        this.controller = dropTombstone
+                        ? new CompactionController(cfs, Collections.singleton(sstable), CompactionManager.getDefaultGcBefore(cfs))
+                        : new ScrubController(cfs);
+
         this.isCommutative = cfs.metadata.isCounter();
 
         boolean hasIndexFile = (new File(sstable.descriptor.filenameFor(Component.PRIMARY_INDEX))).exists();
