@@ -77,7 +77,7 @@ public class Scrubber implements Closeable
 
     public Scrubber(ColumnFamilyStore cfs, SSTableReader sstable, boolean skipCorrupted, boolean isOffline, boolean checkData) throws IOException
     {
-        this(cfs, sstable, skipCorrupted, new OutputHandler.LogOutput(), isOffline, checkData, true);
+        this(cfs, sstable, skipCorrupted, new OutputHandler.LogOutput(), isOffline, checkData, false);
     }
 
     public Scrubber(ColumnFamilyStore cfs, SSTableReader sstable, boolean skipCorrupted, OutputHandler outputHandler, boolean isOffline, boolean checkData, boolean dropTombstone) throws IOException
@@ -96,10 +96,10 @@ public class Scrubber implements Closeable
         if (destination == null)
             throw new IOException("disk full");
 
-        // If we run scrub offline, we should never purge tombstone, as we cannot know if other sstable have data that the tombstone deletes.
-        this.controller = dropTombstone
-                        ? new CompactionController(cfs, Collections.singleton(sstable), CompactionManager.getDefaultGcBefore(cfs))
-                        : new ScrubController(cfs);
+        // If we run scrub offline, we should never purge tombstone, as we cannot know if other sstable have data that the tombstone deletes, unless the user explicitly requested it
+        this.controller = (isOffline && !dropTombstone)
+                        ? new ScrubController(cfs)
+                        : new CompactionController(cfs, Collections.singleton(sstable), CompactionManager.getDefaultGcBefore(cfs));
 
         this.isCommutative = cfs.metadata.isCounter();
 
