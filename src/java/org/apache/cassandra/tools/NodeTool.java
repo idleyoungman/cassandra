@@ -1270,6 +1270,11 @@ public class NodeTool
                 description = "A comma delimited list of sstables to scrub")
         private String sstables = null;
 
+        @Option(title = "ignore_overlap",
+               name = {"-i", "--ignore-overlap"},
+               description = "ignore sstable timetamp overlap when purging tombstones (WARNING: Could bring columns back from the dead)")
+        private boolean ignoreOverlap = false;
+
         @Override
         public void execute(NodeProbe probe)
         {
@@ -1282,7 +1287,7 @@ public class NodeTool
             {
                 try
                 {
-                    probe.scrub(System.out, disableSnapshot, skipCorrupted, !noValidation, sstables, keyspace, cfnames);
+                    probe.scrub(System.out, disableSnapshot, skipCorrupted, !noValidation, sstables, keyspace, ignoreOverlap, cfnames);
                 } catch (Exception e)
                 {
                     throw new RuntimeException("Error occurred during flushing", e);

@@ -99,7 +99,7 @@ public class Scrubber implements Closeable
         // If we run scrub offline, we should never purge tombstone, as we cannot know if other sstable have data that the tombstone deletes, unless the user explicitly requested it
         this.controller = (isOffline && !dropTombstone)
                         ? new ScrubController(cfs)
-                        : new CompactionController(cfs, Collections.singleton(sstable), CompactionManager.getDefaultGcBefore(cfs));
+                        : new CompactionController(cfs, Collections.singleton(sstable), CompactionManager.getDefaultGcBefore(cfs), dropTombstone);
 
         this.isCommutative = cfs.metadata.isCounter();
 
