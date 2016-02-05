@@ -84,7 +84,7 @@ public class TimeWindowCompactionStrategy extends AbstractCompactionStrategy
                 return null;
 
             if (cfs.getDataTracker().markCompacting(latestBucket))
-                return new CompactionTask(cfs, latestBucket, gcBefore, false);
+                return new CompactionTask(cfs, latestBucket, gcBefore, false, options.ignoreOverlapCheck);
         }
     }
 
@@ -359,7 +359,7 @@ public class TimeWindowCompactionStrategy extends AbstractCompactionStrategy
         if (sstables == null)
             return null;
 
-        return Arrays.<AbstractCompactionTask>asList(new CompactionTask(cfs, sstables, gcBefore, false));
+        return Arrays.<AbstractCompactionTask>asList(new CompactionTask(cfs, sstables, gcBefore, false, options.ignoreOverlapCheck));
     }
 
     @Override
@@ -373,7 +373,7 @@ public class TimeWindowCompactionStrategy extends AbstractCompactionStrategy
             return null;
         }
 
-        return new CompactionTask(cfs, sstables, gcBefore, false).setUserDefined(true);
+        return new CompactionTask(cfs, sstables, gcBefore, false, options.ignoreOverlapCheck).setUserDefined(true);
     }
 
     public int getEstimatedRemainingTasks()
