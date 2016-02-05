@@ -359,7 +359,7 @@ public class CompactionManager implements CompactionManagerMBean
                 List<SSTableReader> filtered = new ArrayList<>();
                 for (SSTableReader sstable : input)
                 {
-                    if (filenames.contains(sstable.getFilename()))
+                    if (filenames.contains(sstable.descriptor.relativeFilenameFor(Component.DATA)))
                     {
                         filtered.add(sstable);
                     }
