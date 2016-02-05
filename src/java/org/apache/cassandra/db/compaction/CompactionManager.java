@@ -331,15 +331,40 @@ public class CompactionManager implements CompactionManagerMBean
         }
     }
 
-    public AllSSTableOpStatus performScrub(final ColumnFamilyStore cfs, final boolean skipCorrupted, final boolean checkData) throws InterruptedException, ExecutionException
+    public AllSSTableOpStatus performScrub(final ColumnFamilyStore cfs, final boolean skipCorrupted, final boolean checkData, final String dataFiles) throws InterruptedException, ExecutionException
     {
         assert !cfs.isIndex();
+
+        // dataFiles will be "" if we want all tables to be scrubbed
+        final List<String> filenames = Lists.newArrayList();
+
+        // Paranoid check and cleaning data
+        if(dataFiles != null) {
+            for(String file : dataFiles.split(","))
+            {
+                filenames.add(file.trim());
+            }
+        }
+
         return parallelAllSSTableOperation(cfs, new OneSSTableOperation()
         {
             @Override
             public Iterable<SSTableReader> filterSSTables(Iterable<SSTableReader> input)
             {
-                return input;
+                if (filenames.isEmpty())
+                {
+                    return input;
+                }
+
+                List<SSTableReader> filtered = new ArrayList<>();
+                for (SSTableReader sstable : input)
+                {
+                    if (filenames.contains(sstable.getFilename()))
+                    {
+                        filtered.add(sstable);
+                    }
+                }
+                return filtered;
             }
 
             @Override
