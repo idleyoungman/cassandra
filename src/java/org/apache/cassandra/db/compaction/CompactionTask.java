@@ -52,14 +52,21 @@ public class CompactionTask extends AbstractCompactionTask
     protected static final Logger logger = LoggerFactory.getLogger(CompactionTask.class);
     protected final int gcBefore;
     private final boolean offline;
+    private final boolean ignoreOverlapCheck;
     protected static long totalBytesCompacted = 0;
     private CompactionExecutorStatsCollector collector;
 
     public CompactionTask(ColumnFamilyStore cfs, Iterable<SSTableReader> sstables, int gcBefore, boolean offline)
     {
+        this(cfs, sstables, gcBefore, offline, false);
+    }
+
+    public CompactionTask(ColumnFamilyStore cfs, Iterable<SSTableReader> sstables, int gcBefore, boolean offline, boolean ignoreOverlapCheck)
+    {
         super(cfs, Sets.newHashSet(sstables));
         this.gcBefore = gcBefore;
         this.offline = offline;
+        this.ignoreOverlapCheck = ignoreOverlapCheck;
     }
 
     public static synchronized long addToTotalBytesCompacted(long bytesCompacted)
@@ -315,7 +322,7 @@ public class CompactionTask extends AbstractCompactionTask
 
     protected CompactionController getCompactionController(Set<SSTableReader> toCompact)
     {
-        return new CompactionController(cfs, toCompact, gcBefore);
+        return new CompactionController(cfs, toCompact, gcBefore, ignoreOverlapCheck);
     }
 
     protected boolean partialCompactionsAcceptable()

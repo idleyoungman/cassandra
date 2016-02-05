@@ -31,16 +31,19 @@ public final class TimeWindowCompactionStrategyOptions
     protected static final TimeUnit DEFAULT_COMPACTION_WINDOW_UNIT = TimeUnit.DAYS;
     protected static final int DEFAULT_COMPACTION_WINDOW_SIZE = 1;
     protected static final int DEFAULT_EXPIRED_SSTABLE_CHECK_FREQUENCY_SECONDS = 60 * 10;
+    protected static final boolean DEFAULT_IGNORE_OVERLAP_CHECK = false;
 
     protected static final String TIMESTAMP_RESOLUTION_KEY = "timestamp_resolution";
     protected static final String COMPACTION_WINDOW_UNIT_KEY = "compaction_window_unit";
     protected static final String COMPACTION_WINDOW_SIZE_KEY = "compaction_window_size";
     protected static final String EXPIRED_SSTABLE_CHECK_FREQUENCY_SECONDS_KEY = "expired_sstable_check_frequency_seconds";
+    protected static final String IGNORE_OVERLAP_CHECK = "ignore_overlap_check";
 
     protected final int sstableWindowSize;
     protected final TimeUnit sstableWindowUnit;
     protected final TimeUnit timestampResolution;
     protected final long expiredSSTableCheckFrequency;
+    protected final boolean ignoreOverlapCheck;
 
     protected final static ImmutableList<TimeUnit> validTimestampTimeUnits = ImmutableList.of(TimeUnit.SECONDS, TimeUnit.MILLISECONDS, TimeUnit.MICROSECONDS, TimeUnit.NANOSECONDS);
     protected final static ImmutableList<TimeUnit> validWindowTimeUnits = ImmutableList.of(TimeUnit.MINUTES, TimeUnit.HOURS, TimeUnit.DAYS);
@@ -61,6 +64,9 @@ public final class TimeWindowCompactionStrategyOptions
         optionValue = options.get(EXPIRED_SSTABLE_CHECK_FREQUENCY_SECONDS_KEY);
         expiredSSTableCheckFrequency = TimeUnit.MILLISECONDS.convert(optionValue == null ? DEFAULT_EXPIRED_SSTABLE_CHECK_FREQUENCY_SECONDS : Long.parseLong(optionValue), TimeUnit.SECONDS);
 
+        optionValue = options.get(IGNORE_OVERLAP_CHECK);
+        ignoreOverlapCheck = optionValue == null ? DEFAULT_IGNORE_OVERLAP_CHECK : Boolean.parseBoolean(optionValue);
+
         stcsOptions = new SizeTieredCompactionStrategyOptions(options);
     }
 
@@ -70,6 +76,7 @@ public final class TimeWindowCompactionStrategyOptions
         timestampResolution = DEFAULT_TIMESTAMP_RESOLUTION;
         sstableWindowSize = DEFAULT_COMPACTION_WINDOW_SIZE;
         expiredSSTableCheckFrequency = TimeUnit.MILLISECONDS.convert(DEFAULT_EXPIRED_SSTABLE_CHECK_FREQUENCY_SECONDS, TimeUnit.SECONDS);
+        ignoreOverlapCheck = false;
         stcsOptions = new SizeTieredCompactionStrategyOptions();
     }
 
@@ -134,6 +141,7 @@ public final class TimeWindowCompactionStrategyOptions
         uncheckedOptions.remove(COMPACTION_WINDOW_UNIT_KEY);
         uncheckedOptions.remove(TIMESTAMP_RESOLUTION_KEY);
         uncheckedOptions.remove(EXPIRED_SSTABLE_CHECK_FREQUENCY_SECONDS_KEY);
+        uncheckedOptions.remove(IGNORE_OVERLAP_CHECK);
 
         uncheckedOptions = SizeTieredCompactionStrategyOptions.validateOptions(options, uncheckedOptions);
 
