@@ -353,8 +353,11 @@ public class CompactionManager implements CompactionManagerMBean
             {
                 if (filenames.isEmpty())
                 {
+                    logger.info("Scrubbing all sstables in {}", cfs);
                     return input;
                 }
+
+                logger.info("Filtering sstables to scrub in {} to only include {}", cfs, filenames);
 
                 List<SSTableReader> filtered = new ArrayList<>();
                 for (SSTableReader sstable : input)
@@ -364,6 +367,8 @@ public class CompactionManager implements CompactionManagerMBean
                         filtered.add(sstable);
                     }
                 }
+
+                logger.info("Scrubbing sstables {}", filtered);
                 return filtered;
             }
 
