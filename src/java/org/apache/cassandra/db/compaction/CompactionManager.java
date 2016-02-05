@@ -335,13 +335,13 @@ public class CompactionManager implements CompactionManagerMBean
     {
         assert !cfs.isIndex();
 
-        // dataFiles will be "" if we want all tables to be scrubbed
         final List<String> filenames = Lists.newArrayList();
 
-        // Paranoid check and cleaning data
+        // dataFiles will be null if we want all tables to be scrubbed
         if(dataFiles != null) {
             for(String file : dataFiles.split(","))
             {
+                // Paranoid check and cleaning data
                 filenames.add(file.trim());
             }
         }
