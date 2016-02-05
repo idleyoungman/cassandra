@@ -334,8 +334,17 @@ public class CompactionManager implements CompactionManagerMBean
     public AllSSTableOpStatus performScrub(final ColumnFamilyStore cfs, final boolean skipCorrupted, final boolean checkData, final String dataFiles) throws InterruptedException, ExecutionException
     {
         assert !cfs.isIndex();
+
         // dataFiles will be "" if we want all tables to be scrubbed
-        final List<String> filenames = Arrays.asList(dataFiles.split(","));
+        final List<String> filenames = Lists.newArrayList();
+
+        // Paranoid check and cleaning data
+        if(dataFiles != null) {
+            for(String file : dataFiles.split(","))
+            {
+                filenames.add(file.trim());
+            }
+        }
 
         return parallelAllSSTableOperation(cfs, new OneSSTableOperation()
         {
