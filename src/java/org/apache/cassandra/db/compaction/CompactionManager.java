@@ -335,13 +335,13 @@ public class CompactionManager implements CompactionManagerMBean
     {
         assert !cfs.isIndex();
 
-        // dataFiles will be "" if we want all tables to be scrubbed
         final List<String> filenames = Lists.newArrayList();
 
-        // Paranoid check and cleaning data
+        // dataFiles will be null if we want all tables to be scrubbed
         if(dataFiles != null) {
             for(String file : dataFiles.split(","))
             {
+                // Paranoid check and cleaning data
                 filenames.add(file.trim());
             }
         }
@@ -353,17 +353,22 @@ public class CompactionManager implements CompactionManagerMBean
             {
                 if (filenames.isEmpty())
                 {
+                    logger.info("Scrubbing all sstables in {}", cfs);
                     return input;
                 }
+
+                logger.info("Filtering sstables to scrub in {} to only include {}", cfs, filenames);
 
                 List<SSTableReader> filtered = new ArrayList<>();
                 for (SSTableReader sstable : input)
                 {
-                    if (filenames.contains(sstable.getFilename()))
+                    if (filenames.contains(sstable.descriptor.relativeFilenameFor(Component.DATA)))
                     {
                         filtered.add(sstable);
                     }
                 }
+
+                logger.info("Scrubbing sstables {}", filtered);
                 return filtered;
             }
 

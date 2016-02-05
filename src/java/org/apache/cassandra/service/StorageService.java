@@ -2388,8 +2388,8 @@ public class StorageService extends NotificationBroadcasterSupport implements IE
 
     public int scrub(boolean disableSnapshot, boolean skipCorrupted, boolean checkData, String keyspaceName, String... columnFamilies) throws IOException, ExecutionException, InterruptedException
     {
-        // "" for dataFiles means "scrub all tables"
-        return scrub(disableSnapshot, skipCorrupted, true, "", keyspaceName, columnFamilies);
+        // null for dataFiles means "scrub all tables"
+        return scrub(disableSnapshot, skipCorrupted, true, null, keyspaceName, columnFamilies);
     }
 
     public int scrub(boolean disableSnapshot, boolean skipCorrupted, boolean checkData, String dataFiles, String keyspaceName, String... columnFamilies) throws IOException, ExecutionException, InterruptedException

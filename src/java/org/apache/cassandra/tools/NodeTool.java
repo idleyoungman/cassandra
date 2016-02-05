@@ -1268,7 +1268,7 @@ public class NodeTool
         @Option(title = "sstables",
                 name = {"-f", "--sstables"},
                 description = "A comma delimited list of sstables to scrub")
-        private String sstables;
+        private String sstables = null;
 
         @Override
         public void execute(NodeProbe probe)
