@@ -1683,7 +1683,9 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
             {
                 metric.rowCacheHit.inc();
                 Tracing.trace("Row cache hit");
-                return filterColumnFamily(cachedCf, filter);
+                ColumnFamily result = filterColumnFamily(cachedCf, filter);
+                metric.updateSSTableIterated(0);
+                return result;
             }
 
             metric.rowCacheHitOutOfRange.inc();
@@ -1919,7 +1921,7 @@ public class ColumnFamilyStore implements ColumnFamilyStoreMBean
             {
                 failingSince = System.nanoTime();
             }
-            else if (TimeUnit.MILLISECONDS.toNanos(100) > System.nanoTime() - failingSince)
+            else if (System.nanoTime() - failingSince > TimeUnit.MILLISECONDS.toNanos(100))
             {
                 List<SSTableReader> released = new ArrayList<>();
                 for (SSTableReader reader : view.sstables)
