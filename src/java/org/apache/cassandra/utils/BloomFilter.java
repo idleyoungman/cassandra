@@ -115,19 +115,6 @@ public abstract class BloomFilter extends WrappedSharedCloseable implements IFil
         return true;
     }
 
-    public final boolean isPresent(long[] hashedKeyArray)
-    {
-        setIndexes(hashedKeyArray[0], hashedKeyArray[1], hashCount, bitset.capacity(), hashedKeyArray);
-        for (int i = 0; i < hashCount; i++)
-        {
-            if (!bitset.get(hashedKeyArray[i]))
-            {
-                return false;
-            }
-        }
-        return true;
-    }
-
     public void clear()
     {
         bitset.clear();
