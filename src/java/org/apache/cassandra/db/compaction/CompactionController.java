@@ -17,10 +17,8 @@
  */
 package org.apache.cassandra.db.compaction;
 
-import java.nio.ByteBuffer;
 import java.util.*;
 
-import org.apache.cassandra.utils.MurmurHash;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -188,17 +186,13 @@ public class CompactionController implements AutoCloseable
         }
 
         overlapIterator.update(key);
-
-        long[] hashedKeyArray = new long[21];
-        MurmurHash.hash3_x64_128(key.getKey(), key.getKey().position(),key.getKey().remaining(), 0L, hashedKeyArray);
-
         for (SSTableReader sstable : overlapIterator.overlaps())
         {
             // if we don't have bloom filter(bf_fp_chance=1.0 or filter file is missing),
             // we check index file instead.
             if (sstable.getBloomFilter() instanceof AlwaysPresentFilter && sstable.getPosition(key, SSTableReader.Operator.EQ, false) != null)
                 min = Math.min(min, sstable.getMinTimestamp());
-            else if (sstable.getBloomFilter().isPresent(Arrays.copyOf(hashedKeyArray, hashedKeyArray.length)))
+            else if (sstable.getBloomFilter().isPresent(key.getKey()))
                 min = Math.min(min, sstable.getMinTimestamp());
         }
         return min;

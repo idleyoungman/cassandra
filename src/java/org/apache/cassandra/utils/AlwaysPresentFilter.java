@@ -26,11 +26,6 @@ public class AlwaysPresentFilter implements IFilter
         return true;
     }
 
-    public boolean isPresent(long[] hashedKeyArray)
-    {
-        return true;
-    }
-
     public void add(ByteBuffer key) { }
 
     public void clear() { }
