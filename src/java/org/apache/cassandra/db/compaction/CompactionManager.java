@@ -1096,7 +1096,7 @@ public class CompactionManager implements CompactionManagerMBean
 
     private synchronized Refs<SSTableReader> getSSTablesToValidate(ColumnFamilyStore cfs, Validator validator) {
         Refs<SSTableReader> sstables;
-        boolean noParentSession = validator.desc.parentSessionId == null || ActiveRepairService.instance.getParentRepairSession(validator.desc.parentSessionId;
+        boolean noParentSession = validator.desc.parentSessionId == null || ActiveRepairService.instance.getParentRepairSession(validator.desc.parentSessionId) == null;
 
         try (ColumnFamilyStore.RefViewFragment refView = cfs.selectAndReference(noParentSession ? ColumnFamilyStore.CANONICAL_SSTABLES : ColumnFamilyStore.UNREPAIRED_SSTABLES)) {
             // we don't mark validating sstables as compacting in DataTracker, so we have to mark them referenced
