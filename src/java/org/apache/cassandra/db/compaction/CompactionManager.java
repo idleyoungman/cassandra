@@ -1096,24 +1096,35 @@ public class CompactionManager implements CompactionManagerMBean
 
     private synchronized Refs<SSTableReader> getSSTablesToValidate(ColumnFamilyStore cfs, Validator validator) {
         Refs<SSTableReader> sstables;
+        Set<SSTableReader> sstablesToValidate = new HashSet<>();
         boolean noParentSession = validator.desc.parentSessionId == null || ActiveRepairService.instance.getParentRepairSession(validator.desc.parentSessionId) == null;
 
-        try (ColumnFamilyStore.RefViewFragment refView = cfs.selectAndReference(noParentSession ? ColumnFamilyStore.CANONICAL_SSTABLES : ColumnFamilyStore.UNREPAIRED_SSTABLES)) {
+        if (noParentSession)
+        {
+            return cfs.selectAndReference(ColumnFamilyStore.CANONICAL_SSTABLES).refs;
+        }
+
+        try (ColumnFamilyStore.RefViewFragment refView = cfs.selectAndReference(ColumnFamilyStore.UNREPAIRED_SSTABLES)) {
             // we don't mark validating sstables as compacting in DataTracker, so we have to mark them referenced
             // instead so they won't be cleaned up if they do get compacted during the validation
-            sstables = refView.refs;
-            if (!noParentSession) {
-                Set<SSTableReader> currentlyRepairing = ActiveRepairService.instance.currentlyRepairing(cfs.metadata.cfId, validator.desc.parentSessionId);
+            sstablesToValidate.addAll(refView.sstables);
+            Set<SSTableReader> currentlyRepairing = ActiveRepairService.instance.currentlyRepairing(cfs.metadata.cfId, validator.desc.parentSessionId);
 
-                if (!Sets.intersection(currentlyRepairing, Sets.newHashSet(refView.sstables)).isEmpty())
-                {
-                    logger.error("Cannot start multiple repair sessions over the same sstables");
-                    throw new RuntimeException("Cannot start multiple repair sessions over the same sstables");
-                }
+            if (!Sets.intersection(currentlyRepairing, sstablesToValidate).isEmpty())
+            {
+                logger.error("Cannot start multiple repair sessions over the same sstables");
+                throw new RuntimeException("Cannot start multiple repair sessions over the same sstables");
+            }
 
-                ActiveRepairService.instance.getParentRepairSession(validator.desc.parentSessionId).addSSTables(cfs.metadata.cfId, refView.sstables);
+            sstables = Refs.tryRef(sstablesToValidate);
+            if (sstables == null)
+            {
+                logger.error("Could not reference sstables");
+                throw new RuntimeException("Could not reference sstables");
             }
         }
+
+        ActiveRepairService.instance.getParentRepairSession(validator.desc.parentSessionId).addSSTables(cfs.metadata.cfId, sstablesToValidate);
 
         return sstables;
     }
