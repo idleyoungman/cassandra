@@ -1,3 +1,6 @@
+4.1.4+newrelic.1
+ * Add a new column family option: hint_time_to_live_seconds
+
 4.1.4
  * Memoize Cassandra verion and add a backoff interval for failed schema pulls (CASSANDRA-18902)
  * Fix StackOverflowError on ALTER after many previous schema changes (CASSANDRA-19166)
@@ -32,11 +35,11 @@ Merged from 3.11:
  * Revert CASSANDRA-18543 (CASSANDRA-18854)
  * Fix NPE when using udfContext in UDF after a restart of a node (CASSANDRA-18739)
 Merged from 3.0:
- * Suppress CVE-2023-6378 (CASSANDRA-19142) 
+ * Suppress CVE-2023-6378 (CASSANDRA-19142)
  * Do not set RPC_READY to false on transports shutdown in order to not fail counter updates for deployments with coordinator and storage nodes with transports turned off (CASSANDRA-18935)
  * Suppress CVE-2023-44487 (CASSANDRA-18943)
  * Fix nodetool enable/disablebinary to correctly set rpc readiness in gossip (CASSANDRA-18935)
- * Implement the logic in bin/stop-server (CASSANDRA-18838) 
+ * Implement the logic in bin/stop-server (CASSANDRA-18838)
  * Upgrade snappy-java to 1.1.10.4 (CASSANDRA-18878)
  * Add cqlshrc.sample and credentials.sample into Debian package (CASSANDRA-18818)
  * Refactor validation logic in StorageService.rebuild (CASSANDRA-18803)
@@ -7709,5 +7712,3 @@ Full list of issues resolved in 0.4 is at https://issues.apache.org/jira/secure/
  * Combined blocking and non-blocking versions of insert APIs
  * Added FlushPeriodInMinutes configuration parameter to force
    flushing of infrequently-updated ColumnFamilies
-
-

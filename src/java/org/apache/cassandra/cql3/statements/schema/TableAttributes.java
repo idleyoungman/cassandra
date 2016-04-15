@@ -155,6 +155,9 @@ public final class TableAttributes extends PropertyDefinitions
         if (hasOption(Option.READ_REPAIR))
             builder.readRepair(ReadRepairStrategy.fromString(getString(Option.READ_REPAIR)));
 
+        if (hasOption(Option.HINT_TIME_TO_LIVE_SECONDS))
+            builder.hintTimeToLiveSeconds(getInt(Option.HINT_TIME_TO_LIVE_SECONDS));
+
         return builder.build();
     }
 
