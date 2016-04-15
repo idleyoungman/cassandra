@@ -157,6 +157,9 @@ public final class TableAttributes extends PropertyDefinitions
         if (hasOption(Option.CDC))
             builder.cdc(getBoolean(Option.CDC.toString(), false));
 
+        if (hasOption(Option.HINT_TIME_TO_LIVE_SECONDS))
+            builder.hintTimeToLiveSeconds(getInt(Option.HINT_TIME_TO_LIVE_SECONDS));
+
         return builder.build();
     }
 

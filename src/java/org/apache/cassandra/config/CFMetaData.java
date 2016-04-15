@@ -245,6 +245,12 @@ public final class CFMetaData
         return this;
     }
 
+    public CFMetaData hintTimeToLiveSeconds(int prop)
+    {
+        params = TableParams.builder(params).hintTimeToLiveSeconds(prop).build();
+        return this;
+    }
+
     public CFMetaData speculativeRetry(SpeculativeRetryParam prop)
     {
         params = TableParams.builder(params).speculativeRetry(prop).build();
