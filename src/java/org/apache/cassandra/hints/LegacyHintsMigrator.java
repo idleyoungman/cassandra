@@ -196,11 +196,11 @@ public final class LegacyHintsMigrator
 
         long creationTime = row.getLong("write_time"); // milliseconds, not micros, for the hints table
         int expirationTime = FBUtilities.nowInSeconds() + row.getInt("ttl");
-        int originalGCGS = expirationTime - (int) TimeUnit.MILLISECONDS.toSeconds(creationTime);
+        int originalTTL = expirationTime - (int) TimeUnit.MILLISECONDS.toSeconds(creationTime);
 
-        int gcgs = Math.min(originalGCGS, mutation.smallestGCGS());
+        int ttl = Math.min(originalTTL, mutation.smallestHintTTL());
 
-        return Hint.create(mutation, creationTime, gcgs);
+        return Hint.create(mutation, creationTime, ttl);
     }
 
     private static Mutation deserializeLegacyMutation(UntypedResultSet.Row row)
