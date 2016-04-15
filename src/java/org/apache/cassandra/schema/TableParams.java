@@ -51,7 +51,8 @@ public final class TableParams
         READ_REPAIR_CHANCE,
         SPECULATIVE_RETRY,
         CRC_CHECK_CHANCE,
-        CDC;
+        CDC,
+        HINT_TIME_TO_LIVE_SECONDS;
 
         @Override
         public String toString()
@@ -69,6 +70,7 @@ public final class TableParams
     public static final int DEFAULT_MIN_INDEX_INTERVAL = 128;
     public static final int DEFAULT_MAX_INDEX_INTERVAL = 2048;
     public static final double DEFAULT_CRC_CHECK_CHANCE = 1.0;
+    public static final int DEFAULT_HINT_TIME_TO_LIVE_SECONDS = -1;
 
     public final String comment;
     public final double readRepairChance;
@@ -80,6 +82,7 @@ public final class TableParams
     public final int memtableFlushPeriodInMs;
     public final int minIndexInterval;
     public final int maxIndexInterval;
+    public final int hintTimeToLiveSeconds;
     public final SpeculativeRetryParam speculativeRetry;
     public final CachingParams caching;
     public final CompactionParams compaction;
@@ -101,6 +104,7 @@ public final class TableParams
         memtableFlushPeriodInMs = builder.memtableFlushPeriodInMs;
         minIndexInterval = builder.minIndexInterval;
         maxIndexInterval = builder.maxIndexInterval;
+        hintTimeToLiveSeconds = builder.hintTimeToLiveSeconds;
         speculativeRetry = builder.speculativeRetry;
         caching = builder.caching;
         compaction = builder.compaction;
@@ -129,6 +133,7 @@ public final class TableParams
                             .memtableFlushPeriodInMs(params.memtableFlushPeriodInMs)
                             .minIndexInterval(params.minIndexInterval)
                             .readRepairChance(params.readRepairChance)
+                            .hintTimeToLiveSeconds(params.hintTimeToLiveSeconds)
                             .speculativeRetry(params.speculativeRetry)
                             .extensions(params.extensions)
                             .cdc(params.cdc);
@@ -192,6 +197,9 @@ public final class TableParams
 
         if (memtableFlushPeriodInMs < 0)
             fail("%s must be greater than or equal to 0 (got %s)", Option.MEMTABLE_FLUSH_PERIOD_IN_MS, memtableFlushPeriodInMs);
+
+        if (hintTimeToLiveSeconds != DEFAULT_HINT_TIME_TO_LIVE_SECONDS && hintTimeToLiveSeconds < 0)
+            fail("%s must be greater than or equal to 0 (got %s)", Option.HINT_TIME_TO_LIVE_SECONDS, hintTimeToLiveSeconds);
     }
 
     private static void fail(String format, Object... args)
@@ -220,6 +228,7 @@ public final class TableParams
             && memtableFlushPeriodInMs == p.memtableFlushPeriodInMs
             && minIndexInterval == p.minIndexInterval
             && maxIndexInterval == p.maxIndexInterval
+            && hintTimeToLiveSeconds == p.hintTimeToLiveSeconds
             && speculativeRetry.equals(p.speculativeRetry)
             && caching.equals(p.caching)
             && compaction.equals(p.compaction)
@@ -241,6 +250,7 @@ public final class TableParams
                                 memtableFlushPeriodInMs,
                                 minIndexInterval,
                                 maxIndexInterval,
+                                hintTimeToLiveSeconds,
                                 speculativeRetry,
                                 caching,
                                 compaction,
@@ -263,6 +273,7 @@ public final class TableParams
                           .add(Option.MEMTABLE_FLUSH_PERIOD_IN_MS.toString(), memtableFlushPeriodInMs)
                           .add(Option.MIN_INDEX_INTERVAL.toString(), minIndexInterval)
                           .add(Option.MAX_INDEX_INTERVAL.toString(), maxIndexInterval)
+                          .add(Option.HINT_TIME_TO_LIVE_SECONDS.toString(), hintTimeToLiveSeconds)
                           .add(Option.SPECULATIVE_RETRY.toString(), speculativeRetry)
                           .add(Option.CACHING.toString(), caching)
                           .add(Option.COMPACTION.toString(), compaction)
@@ -284,6 +295,7 @@ public final class TableParams
         private int memtableFlushPeriodInMs = DEFAULT_MEMTABLE_FLUSH_PERIOD_IN_MS;
         private int minIndexInterval = DEFAULT_MIN_INDEX_INTERVAL;
         private int maxIndexInterval = DEFAULT_MAX_INDEX_INTERVAL;
+        private int hintTimeToLiveSeconds = DEFAULT_HINT_TIME_TO_LIVE_SECONDS;
         private SpeculativeRetryParam speculativeRetry = SpeculativeRetryParam.DEFAULT;
         private CachingParams caching = CachingParams.DEFAULT;
         private CompactionParams compaction = CompactionParams.DEFAULT;
@@ -357,6 +369,12 @@ public final class TableParams
         public Builder maxIndexInterval(int val)
         {
             maxIndexInterval = val;
+            return this;
+        }
+
+        public Builder hintTimeToLiveSeconds(int val)
+        {
+            hintTimeToLiveSeconds = val;
             return this;
         }
 

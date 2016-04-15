@@ -75,7 +75,7 @@ public class HintTest
     }
 
     @Before
-    public void resetGcGraceSeconds()
+    public void resetGcGraceSecondsAndHintTTL()
     {
         TokenMetadata tokenMeta = StorageService.instance.getTokenMetadata();
         InetAddress local = FBUtilities.getBroadcastAddress();
@@ -84,7 +84,8 @@ public class HintTest
         tokenMeta.updateNormalTokens(BootStrapper.getRandomTokens(tokenMeta, 1), local);
 
         for (CFMetaData table : Schema.instance.getTablesAndViews(KEYSPACE))
-            table.gcGraceSeconds(TableParams.DEFAULT_GC_GRACE_SECONDS);
+            table.gcGraceSeconds(TableParams.DEFAULT_GC_GRACE_SECONDS)
+                 .hintTimeToLiveSeconds(TableParams.DEFAULT_HINT_TIME_TO_LIVE_SECONDS);
     }
 
     @Test
@@ -177,6 +178,30 @@ public class HintTest
         assertNoPartitions(key, TABLE0);
         assertNoPartitions(key, TABLE1);
         assertNoPartitions(key, TABLE2);
+    }
+
+    @Test
+    public void testApplyWithTTL()
+    {
+        long now = FBUtilities.timestampMicros();
+        String key = "testApplyWithTTL";
+        Mutation mutation = createMutation(key, now);
+
+        // sanity check that there is no data inside yet
+        assertNoPartitions(key, TABLE0);
+        assertNoPartitions(key, TABLE1);
+        assertNoPartitions(key, TABLE2);
+
+        // lower the GC GS on TABLE0 to 0, but set hint TTL to something bigger
+        Schema.instance.getCFMetaData(KEYSPACE, TABLE0)
+                       .gcGraceSeconds(0)
+                       .hintTimeToLiveSeconds(7200);
+
+        Hint.create(mutation, now / 1000).apply();
+
+        // the updates should have been applied
+        for (PartitionUpdate partition : mutation.getPartitionUpdates())
+            assertPartitionsEqual(partition, readPartition(key, partition.metadata().cfName));
     }
 
     @Test

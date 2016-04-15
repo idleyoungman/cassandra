@@ -498,6 +498,9 @@ public final class LegacySchemaMigrator
         if (row.has("max_index_interval"))
             params.maxIndexInterval(row.getInt("max_index_interval"));
 
+        if (row.has("hint_time_to_live_seconds"))
+            params.hintTimeToLiveSeconds(row.getInt("hint_time_to_live_seconds"));
+
         if (row.has("bloom_filter_fp_chance"))
             params.bloomFilterFpChance(row.getDouble("bloom_filter_fp_chance"));
 

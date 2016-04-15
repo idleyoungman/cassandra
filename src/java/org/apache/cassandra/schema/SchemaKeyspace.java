@@ -152,6 +152,7 @@ public final class SchemaKeyspace
                 + "max_index_interval int,"
                 + "memtable_flush_period_in_ms int,"
                 + "min_index_interval int,"
+                + "hint_time_to_live_seconds int,"
                 + "read_repair_chance double,"
                 + "speculative_retry text,"
                 + "cdc boolean,"
@@ -217,6 +218,7 @@ public final class SchemaKeyspace
                 + "max_index_interval int,"
                 + "memtable_flush_period_in_ms int,"
                 + "min_index_interval int,"
+                + "hint_time_to_live_seconds int,"
                 + "read_repair_chance double,"
                 + "speculative_retry text,"
                 + "cdc boolean,"
@@ -570,6 +572,7 @@ public final class SchemaKeyspace
                .add("max_index_interval", params.maxIndexInterval)
                .add("memtable_flush_period_in_ms", params.memtableFlushPeriodInMs)
                .add("min_index_interval", params.minIndexInterval)
+               .add("hint_time_to_live_seconds", params.hintTimeToLiveSeconds)
                .add("read_repair_chance", params.readRepairChance)
                .add("speculative_retry", params.speculativeRetry.toString())
                .add("crc_check_chance", params.crcCheckChance)
@@ -1095,6 +1098,7 @@ public final class SchemaKeyspace
                           .maxIndexInterval(row.getInt("max_index_interval"))
                           .memtableFlushPeriodInMs(row.getInt("memtable_flush_period_in_ms"))
                           .minIndexInterval(row.getInt("min_index_interval"))
+                          .hintTimeToLiveSeconds(row.getInt("hint_time_to_live_seconds"))
                           .readRepairChance(row.getDouble("read_repair_chance"))
                           .crcCheckChance(row.getDouble("crc_check_chance"))
                           .speculativeRetry(SpeculativeRetryParam.fromString(row.getString("speculative_retry")))

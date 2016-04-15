@@ -48,6 +48,7 @@ class Cql3ParsingRuleSet(CqlParsingRuleSet):
         ('gc_grace_seconds', None),
         ('min_index_interval', None),
         ('max_index_interval', None),
+        ('hint_time_to_live_seconds', None),
         ('read_repair_chance', None),
         ('default_time_to_live', None),
         ('speculative_retry', None),
@@ -484,7 +485,8 @@ def cf_prop_val_completer(ctxt, cass):
                     'dclocal_read_repair_chance'):
         return [Hint('<float_between_0_and_1>')]
     if this_opt in ('min_compaction_threshold', 'max_compaction_threshold',
-                    'gc_grace_seconds', 'min_index_interval', 'max_index_interval'):
+                    'gc_grace_seconds', 'min_index_interval', 'max_index_interval',
+                    'hint_time_to_live_seconds'):
         return [Hint('<integer>')]
     if this_opt in ('cdc'):
         return [Hint('<true|false>')]
