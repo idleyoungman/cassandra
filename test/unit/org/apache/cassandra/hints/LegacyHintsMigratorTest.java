@@ -157,11 +157,11 @@ public class LegacyHintsMigratorTest
             {
                 Hint hint = actualHints.poll();
                 Mutation mutation = entry.getValue().poll();
-                int ttl = mutation.smallestGCGS();
+                int ttl = mutation.smallestHintTTL();
 
                 assertEquals(timestamp, hint.creationTime);
-                assertEquals(ttl, hint.gcgs);
-                assertTrue(mutation + " != " + hint.mutation, Util.sameContent(mutation, hint.mutation));
+                assertEquals(ttl, hint.ttl);
+                assertMutationsEqual(mutation, hint.mutation);
             }
         }
     }
@@ -170,7 +170,7 @@ public class LegacyHintsMigratorTest
     private static Mutation createLegacyHint(Mutation mutation, long now, UUID targetId)
     {
         int version = MessagingService.VERSION_21;
-        int ttl = mutation.smallestGCGS();
+        int ttl = mutation.smallestHintTTL();
         UUID hintId = UUIDGen.getTimeUUID();
 
         ByteBuffer key = UUIDType.instance.decompose(targetId);

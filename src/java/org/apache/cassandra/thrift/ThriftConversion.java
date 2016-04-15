@@ -320,6 +320,8 @@ public class ThriftConversion
                 newCFMD.minIndexInterval(cf_def.min_index_interval);
             if (cf_def.isSetMax_index_interval())
                 newCFMD.maxIndexInterval(cf_def.max_index_interval);
+            if (cf_def.isSetHint_time_to_live_seconds())
+                newCFMD.hintTimeToLiveSeconds(cf_def.hint_time_to_live_seconds);
             if (cf_def.isSetSpeculative_retry())
                 newCFMD.speculativeRetry(SpeculativeRetryParam.fromString(cf_def.speculative_retry));
             if (cf_def.isSetTriggers())
@@ -446,6 +448,8 @@ public class ThriftConversion
             // ensure the max is at least as large as the min
             cf_def.setMax_index_interval(Math.max(cf_def.min_index_interval, TableParams.DEFAULT_MAX_INDEX_INTERVAL));
         }
+        if (!cf_def.isSetHint_time_to_live_seconds())
+            cf_def.setHint_time_to_live_seconds(TableParams.DEFAULT_HINT_TIME_TO_LIVE_SECONDS);
     }
 
     public static CfDef toThrift(CFMetaData cfm)
@@ -474,6 +478,7 @@ public class ThriftConversion
         // We only return the alias if only one is set since thrift don't know about multiple key aliases
         if (cfm.partitionKeyColumns().size() == 1)
             def.setKey_alias(cfm.partitionKeyColumns().get(0).name.bytes);
+
         def.setColumn_metadata(columnDefinitionsToThrift(cfm, cfm.allColumns()));
         def.setCompaction_strategy(cfm.params.compaction.klass().getName());
         def.setCompaction_strategy_options(cfm.params.compaction.options());
@@ -481,6 +486,7 @@ public class ThriftConversion
         def.setBloom_filter_fp_chance(cfm.params.bloomFilterFpChance);
         def.setMin_index_interval(cfm.params.minIndexInterval);
         def.setMax_index_interval(cfm.params.maxIndexInterval);
+        def.setHint_time_to_live_seconds(cfm.params.hintTimeToLiveSeconds);
         def.setMemtable_flush_period_in_ms(cfm.params.memtableFlushPeriodInMs);
         def.setCaching(toThrift(cfm.params.caching));
         def.setCells_per_row_to_cache(toThriftCellsPerRow(cfm.params.caching));

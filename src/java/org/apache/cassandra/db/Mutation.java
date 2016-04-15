@@ -17,16 +17,6 @@
  */
 package org.apache.cassandra.db;
 
-import java.io.IOException;
-import java.nio.ByteBuffer;
-import java.util.*;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.atomic.AtomicLong;
-
-import com.google.common.base.Throwables;
-import com.google.common.util.concurrent.Uninterruptibles;
-import org.apache.commons.lang3.StringUtils;
 import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.Schema;
@@ -37,7 +27,16 @@ import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.net.MessageOut;
 import org.apache.cassandra.net.MessagingService;
+import org.apache.cassandra.schema.TableParams;
 import org.apache.cassandra.utils.ByteBufferUtil;
+import org.apache.commons.lang3.StringUtils;
+
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.util.*;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicLong;
+
 
 // TODO convert this to a Builder pattern instead of encouraging M.add directly,
 // which is less-efficient since we have to keep a mutable HashMap around
@@ -269,9 +268,22 @@ public class Mutation implements IMutation
         return gcgs;
     }
 
-    public boolean trackedByCDC()
-    {
+    public boolean trackedByCDC() {
         return cdcEnabled;
+    }
+
+    public int smallestHintTTL()
+    {
+        int ttl = Integer.MAX_VALUE;
+        for (PartitionUpdate update : getPartitionUpdates())
+        {
+            int hintTtl = update.metadata().params.hintTimeToLiveSeconds;
+            if (hintTtl == TableParams.DEFAULT_HINT_TIME_TO_LIVE_SECONDS)
+                hintTtl = update.metadata().params.gcGraceSeconds;
+
+            ttl = Math.min(ttl, hintTtl);
+        }
+        return ttl;
     }
 
     public String toString()

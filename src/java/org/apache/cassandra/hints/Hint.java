@@ -39,14 +39,15 @@ import static org.apache.cassandra.db.TypeSizes.sizeofUnsignedVInt;
  * - Why do we need to track hint creation time?
  * - We must exclude updates for tables that have been truncated after hint's creation, otherwise the result is data corruption.
  *
- * - Why do we need to track gc grace seconds?
- * - Hints can stay in storage for a while before being applied, and without recording gc grace seconds (+ creation time),
- *   if we apply the mutation blindly, we risk resurrecting a deleted value, a tombstone for which had been already
+ * - How is the hint TTL calculated?
+ * - The hint TTL is the smallest hint TTL value for all tables involed in the mutation. If a table does not have hint TTL
+ *   set, gc_grace_period is used. Hints can stay in storage for a while before being applied, and without paying attention
+ *   to the TTL if we apply the mutation blindly, we risk resurrecting a deleted value, a tombstone for which had been already
  *   compacted away while the hint was in storage.
  *
- *   We also look at the smallest current value of the gcgs param for each affected table when applying the hint, and use
- *   creation time + min(recorded gc gs, current gcgs + current gc grace) as the overall hint expiration time.
- *   This allows now to safely reduce gc gs on tables without worrying that an applied old hint might resurrect any data.
+ *   We also look at the smallest current value of the TTL for each affected table when applying the hint, and use
+ *   creation time + min(recorded TTL, current TTL) as the overall hint expiration time.
+ *   This allows now to safely reduce gc gs or hint TTL on tables without worrying that an applied old hint might resurrect any data.
  */
 public final class Hint
 {
@@ -54,13 +55,13 @@ public final class Hint
 
     final Mutation mutation;
     final long creationTime;  // time of hint creation (in milliseconds)
-    final int gcgs; // the smallest gc gs of all involved tables
+    final int ttl; // the TTL for the hint
 
-    private Hint(Mutation mutation, long creationTime, int gcgs)
+    private Hint(Mutation mutation, long creationTime, int ttl)
     {
         this.mutation = mutation;
         this.creationTime = creationTime;
-        this.gcgs = gcgs;
+        this.ttl = ttl;
     }
 
     /**
@@ -69,17 +70,17 @@ public final class Hint
      */
     public static Hint create(Mutation mutation, long creationTime)
     {
-        return new Hint(mutation, creationTime, mutation.smallestGCGS());
+        return new Hint(mutation, creationTime, mutation.smallestHintTTL());
     }
 
     /*
      * @param mutation the hinted mutation
      * @param creationTime time of this hint's creation (in milliseconds since epoch)
-     * @param gcgs the smallest gcgs of all tables involved at the time of hint creation (in seconds)
+     * @param ttl the smallest hint TTL of all tables involved at the time of hint creation (in seconds)
      */
-    public static Hint create(Mutation mutation, long creationTime, int gcgs)
+    public static Hint create(Mutation mutation, long creationTime, int ttl)
     {
-        return new Hint(mutation, creationTime, gcgs);
+        return new Hint(mutation, creationTime, ttl);
     }
 
     /**
@@ -119,8 +120,8 @@ public final class Hint
      */
     boolean isLive()
     {
-        int smallestGCGS = Math.min(gcgs, mutation.smallestGCGS());
-        long expirationTime = creationTime + TimeUnit.SECONDS.toMillis(smallestGCGS);
+        int smallestTTL = Math.min(ttl, mutation.smallestHintTTL());
+        long expirationTime = creationTime + TimeUnit.SECONDS.toMillis(smallestTTL);
         return expirationTime > System.currentTimeMillis();
     }
 
@@ -129,7 +130,7 @@ public final class Hint
         public long serializedSize(Hint hint, int version)
         {
             long size = sizeof(hint.creationTime);
-            size += sizeofUnsignedVInt(hint.gcgs);
+            size += sizeofUnsignedVInt(hint.ttl);
             size += Mutation.serializer.serializedSize(hint.mutation, version);
             return size;
         }
@@ -137,7 +138,7 @@ public final class Hint
         public void serialize(Hint hint, DataOutputPlus out, int version) throws IOException
         {
             out.writeLong(hint.creationTime);
-            out.writeUnsignedVInt(hint.gcgs);
+            out.writeUnsignedVInt(hint.ttl);
             Mutation.serializer.serialize(hint.mutation, out, version);
         }
 
