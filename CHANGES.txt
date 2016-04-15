@@ -1,3 +1,6 @@
+4.0.6-newrelic-v1
+ * Add a new column family option: hint_time_to_live_seconds
+
 4.0.6
  * Fix race condition on updating cdc size and advancing to next segment (CASSANDRA-17792)
  * Add 'noboolean' rpm build for older distros like CentOS7 (CASSANDRA-17765)
