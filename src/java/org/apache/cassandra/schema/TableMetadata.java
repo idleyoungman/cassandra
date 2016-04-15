@@ -825,6 +825,12 @@ public class TableMetadata implements SchemaElement
             return this;
         }
 
+        public Builder hintTimeToLiveSeoncds(int val)
+        {
+            params.hintTimeToLiveSeconds(val);
+            return this;
+        }
+
         public Builder memtableFlushPeriod(int val)
         {
             params.memtableFlushPeriodInMs(val);
