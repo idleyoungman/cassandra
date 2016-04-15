@@ -75,6 +75,7 @@ public final class CFMetaData
     public final static SpeculativeRetry DEFAULT_SPECULATIVE_RETRY = new SpeculativeRetry(SpeculativeRetry.RetryType.PERCENTILE, 0.99);
     public final static int DEFAULT_MIN_INDEX_INTERVAL = 128;
     public final static int DEFAULT_MAX_INDEX_INTERVAL = 2048;
+    public final static int DEFAULT_HINT_TIME_TO_LIVE_SECONDS = -1;
 
     // Note that this is the default only for user created tables
     public final static String DEFAULT_COMPRESSOR = LZ4Compressor.class.getCanonicalName();
@@ -186,6 +187,7 @@ public final class CFMetaData
     private volatile CachingOptions caching = DEFAULT_CACHING_STRATEGY;
     private volatile int minIndexInterval = DEFAULT_MIN_INDEX_INTERVAL;
     private volatile int maxIndexInterval = DEFAULT_MAX_INDEX_INTERVAL;
+    private volatile int hintTimeToLiveSeconds = DEFAULT_HINT_TIME_TO_LIVE_SECONDS;
     private volatile int memtableFlushPeriod = 0;
     private volatile int defaultTimeToLive = DEFAULT_DEFAULT_TIME_TO_LIVE;
     private volatile SpeculativeRetry speculativeRetry = DEFAULT_SPECULATIVE_RETRY;
@@ -236,6 +238,7 @@ public final class CFMetaData
     public CFMetaData caching(CachingOptions prop) {caching = prop; return this;}
     public CFMetaData minIndexInterval(int prop) {minIndexInterval = prop; return this;}
     public CFMetaData maxIndexInterval(int prop) {maxIndexInterval = prop; return this;}
+    public CFMetaData hintTimeToLiveSeconds(int prop) {hintTimeToLiveSeconds = prop; return this;}
     public CFMetaData memtableFlushPeriod(int prop) {memtableFlushPeriod = prop; return this;}
     public CFMetaData defaultTimeToLive(int prop) {defaultTimeToLive = prop; return this;}
     public CFMetaData speculativeRetry(SpeculativeRetry prop) {speculativeRetry = prop; return this;}
@@ -409,6 +412,7 @@ public final class CFMetaData
                       .defaultTimeToLive(oldCFMD.defaultTimeToLive)
                       .minIndexInterval(oldCFMD.minIndexInterval)
                       .maxIndexInterval(oldCFMD.maxIndexInterval)
+                      .hintTimeToLiveSeconds(oldCFMD.hintTimeToLiveSeconds)
                       .speculativeRetry(oldCFMD.speculativeRetry)
                       .memtableFlushPeriod(oldCFMD.memtableFlushPeriod)
                       .droppedColumns(new HashMap<>(oldCFMD.droppedColumns))
@@ -621,6 +625,11 @@ public final class CFMetaData
         return maxIndexInterval;
     }
 
+    public int getHintTimeToLiveSeconds()
+    {
+        return hintTimeToLiveSeconds;
+    }
+
     public SpeculativeRetry getSpeculativeRetry()
     {
         return speculativeRetry;
@@ -680,6 +689,7 @@ public final class CFMetaData
             && Objects.equal(defaultTimeToLive, other.defaultTimeToLive)
             && Objects.equal(minIndexInterval, other.minIndexInterval)
             && Objects.equal(maxIndexInterval, other.maxIndexInterval)
+            && Objects.equal(hintTimeToLiveSeconds, other.hintTimeToLiveSeconds)
             && Objects.equal(speculativeRetry, other.speculativeRetry)
             && Objects.equal(droppedColumns, other.droppedColumns)
             && Objects.equal(triggers, other.triggers)
@@ -713,6 +723,7 @@ public final class CFMetaData
             .append(defaultTimeToLive)
             .append(minIndexInterval)
             .append(maxIndexInterval)
+            .append(hintTimeToLiveSeconds)
             .append(speculativeRetry)
             .append(droppedColumns)
             .append(triggers)
@@ -769,6 +780,7 @@ public final class CFMetaData
         caching = cfm.caching;
         minIndexInterval = cfm.minIndexInterval;
         maxIndexInterval = cfm.maxIndexInterval;
+        hintTimeToLiveSeconds = cfm.hintTimeToLiveSeconds;
         memtableFlushPeriod = cfm.memtableFlushPeriod;
         defaultTimeToLive = cfm.defaultTimeToLive;
         speculativeRetry = cfm.speculativeRetry;
@@ -1488,6 +1500,7 @@ public final class CFMetaData
             .append("defaultTimeToLive", defaultTimeToLive)
             .append("minIndexInterval", minIndexInterval)
             .append("maxIndexInterval", maxIndexInterval)
+            .append("hintTimeToLiveSeconds", hintTimeToLiveSeconds)
             .append("speculativeRetry", speculativeRetry)
             .append("droppedColumns", droppedColumns)
             .append("triggers", triggers.values())

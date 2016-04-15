@@ -49,6 +49,7 @@ public class HintedHandOffTest
 
     public static final String KEYSPACE4 = "HintedHandOffTest4";
     public static final String STANDARD1_CF = "Standard1";
+    public static final String STANDARD3_CF = "Standard3";
     public static final String COLUMN1 = "column1";
 
     @BeforeClass
@@ -58,7 +59,8 @@ public class HintedHandOffTest
         SchemaLoader.createKeyspace(KEYSPACE4,
                                     SimpleStrategy.class,
                                     KSMetaData.optsWithRF(1),
-                                    SchemaLoader.standardCFMD(KEYSPACE4, STANDARD1_CF));
+                                    SchemaLoader.standardCFMD(KEYSPACE4, STANDARD1_CF),
+                                    SchemaLoader.standardCFMD(KEYSPACE4, STANDARD3_CF));
     }
 
     // Test compaction of hints column family. It shouldn't remove all columns on compaction.
@@ -93,6 +95,37 @@ public class HintedHandOffTest
         // single row should not be removed because of gc_grace_seconds
         // is 10 hours and there are no any tombstones in sstable
         assertEquals(1, hintStore.getSSTables().size());
+    }
+
+    @Test
+    public void testHintTTL() throws Exception
+    {
+        // set hint_time_to_live_seconds on one of the column families
+        Keyspace keyspace = Keyspace.open(KEYSPACE4);
+        ColumnFamilyStore cf1 = keyspace.getColumnFamilyStore(STANDARD3_CF);
+        cf1.metadata.hintTimeToLiveSeconds(7200); // 2 hours
+
+        // prepare a mutation
+        Mutation rm1 = new Mutation(KEYSPACE4, ByteBufferUtil.bytes(1));
+        rm1.add(STANDARD1_CF, Util.cellname(COLUMN1), ByteBufferUtil.EMPTY_BYTE_BUFFER, System.currentTimeMillis());
+
+        // the hint TTL should be calculated using gc_grace_seconds
+        assertEquals(cf1.metadata.getGcGraceSeconds(), HintedHandOffManager.calculateHintTTL(rm1));
+
+        // another mutation for for a CF where hint_time_to_live_seconds hasn't been set
+        Mutation rm2 = new Mutation(KEYSPACE4, ByteBufferUtil.bytes(1));
+        rm2.add(STANDARD3_CF, Util.cellname(COLUMN1), ByteBufferUtil.EMPTY_BYTE_BUFFER, System.currentTimeMillis());
+
+        // the hint TTL calculation should use the explicitly set value
+        assertEquals(7200, HintedHandOffManager.calculateHintTTL(rm2));
+
+        // a mutation touching both CFs
+        Mutation rm3 = new Mutation(KEYSPACE4, ByteBufferUtil.bytes(1));
+        rm3.add(STANDARD1_CF, Util.cellname(COLUMN1), ByteBufferUtil.EMPTY_BYTE_BUFFER, System.currentTimeMillis());
+        rm3.add(STANDARD3_CF, Util.cellname(COLUMN1), ByteBufferUtil.EMPTY_BYTE_BUFFER, System.currentTimeMillis());
+
+        // the hint TTL is the minimum of gc_grace_seconds and hint_time_to_live_seconds
+        assertEquals(7200, HintedHandOffManager.calculateHintTTL(rm3));
     }
 
     @Test

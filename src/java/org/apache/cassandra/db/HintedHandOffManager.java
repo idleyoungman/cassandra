@@ -40,6 +40,7 @@ import org.slf4j.LoggerFactory;
 import org.apache.cassandra.concurrent.DebuggableScheduledThreadPoolExecutor;
 import org.apache.cassandra.concurrent.JMXEnabledThreadPoolExecutor;
 import org.apache.cassandra.concurrent.NamedThreadFactory;
+import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.config.Schema;
 import org.apache.cassandra.db.compaction.CompactionManager;
@@ -150,14 +151,20 @@ public class HintedHandOffManager implements HintedHandOffManagerMBean
 
     /*
      * determine the TTL for the hint Mutation
-     * this is set at the smallest GCGraceSeconds for any of the CFs in the RM
-     * this ensures that deletes aren't "undone" by delivery of an old hint
+     * this is set at the smallest hintTimeToLiveSeconds (or GCGraceSeconds if not set)
+     * for any of the CFs in the RM this ensures that deletes aren't "undone"
+     * by delivery of an old hint
      */
     public static int calculateHintTTL(Mutation mutation)
     {
         int ttl = maxHintTTL;
         for (ColumnFamily cf : mutation.getColumnFamilies())
-            ttl = Math.min(ttl, cf.metadata().getGcGraceSeconds());
+        {
+            int cfHintTtl = cf.metadata().getHintTimeToLiveSeconds();
+            if (cfHintTtl == CFMetaData.DEFAULT_HINT_TIME_TO_LIVE_SECONDS)
+                cfHintTtl = cf.metadata().getGcGraceSeconds();
+            ttl = Math.min(ttl, cfHintTtl);
+        }
         return ttl;
     }
 

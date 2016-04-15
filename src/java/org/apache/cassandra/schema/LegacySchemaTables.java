@@ -109,6 +109,7 @@ public class LegacySchemaTables
                 + "memtable_flush_period_in_ms int,"
                 + "min_compaction_threshold int,"
                 + "min_index_interval int,"
+                + "hint_time_to_live_seconds int,"
                 + "read_repair_chance double,"
                 + "speculative_retry text,"
                 + "subcomparator text,"
@@ -887,6 +888,7 @@ public class LegacySchemaTables
         adder.add("memtable_flush_period_in_ms", table.getMemtableFlushPeriod());
         adder.add("min_compaction_threshold", table.getMinCompactionThreshold());
         adder.add("min_index_interval", table.getMinIndexInterval());
+        adder.add("hint_time_to_live_seconds", table.getHintTimeToLiveSeconds());
         adder.add("read_repair_chance", table.getReadRepairChance());
         adder.add("speculative_retry", table.getSpeculativeRetry().toString());
 
@@ -1094,6 +1096,8 @@ public class LegacySchemaTables
         cfm.compactionStrategyClass(CFMetaData.createCompactionStrategy(result.getString("compaction_strategy_class")));
         cfm.compressionParameters(CompressionParameters.create(fromJsonMap(result.getString("compression_parameters"))));
         cfm.compactionStrategyOptions(fromJsonMap(result.getString("compaction_strategy_options")));
+        if (result.has("hint_time_to_live_seconds"))
+            cfm.hintTimeToLiveSeconds(result.getInt("hint_time_to_live_seconds"));
 
         if (result.has("min_index_interval"))
             cfm.minIndexInterval(result.getInt("min_index_interval"));
