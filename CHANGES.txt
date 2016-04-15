@@ -1,3 +1,6 @@
+4.0.14-newrelic-v1
+ * Replace Add a new column family option: hint_time_to_live_seconds
+
 4.0.14
  * Safer handling of out-of-range tokens (CASSANDRA-13704)
  * Fix memory leak in BTree.FastBuilder (CASSANDRA-19785)
@@ -63,11 +66,11 @@ Merged from 3.11:
  * Fix NPE when using udfContext in UDF after a restart of a node (CASSANDRA-18739)
  * Moved jflex from runtime to build dependencies (CASSANDRA-18664)
 Merged from 3.0:
- * Suppress CVE-2023-6378 (CASSANDRA-19142) 
+ * Suppress CVE-2023-6378 (CASSANDRA-19142)
  * Do not set RPC_READY to false on transports shutdown in order to not fail counter updates for deployments with coordinator and storage nodes with transports turned off (CASSANDRA-18935)
  * Suppress CVE-2023-44487 (CASSANDRA-18943)
  * Fix nodetool enable/disablebinary to correctly set rpc readiness in gossip (CASSANDRA-18935)
- * Implement the logic in bin/stop-server (CASSANDRA-18838) 
+ * Implement the logic in bin/stop-server (CASSANDRA-18838)
  * Upgrade snappy-java to 1.1.10.4 (CASSANDRA-18878)
  * Add cqlshrc.sample and credentials.sample into Debian package (CASSANDRA-18818)
  * Refactor validation logic in StorageService.rebuild (CASSANDRA-18803)
@@ -102,7 +105,6 @@ Merged from 3.0:
  * Backport CASSANDRA-10508: Remove hard-coded SSL cipher suites (CASSANDRA-18575)
  * Suppress CVE-2023-2976 (CASSANDRA-18562)
  * Remove dh_python use in Debian packaging (CASSANDRA-18558)
-
 
 4.0.10
  * Improve nodetool enable{audit,fullquery}log (CASSANDRA-18550)
@@ -7500,5 +7502,3 @@ Full list of issues resolved in 0.4 is at https://issues.apache.org/jira/secure/
  * Combined blocking and non-blocking versions of insert APIs
  * Added FlushPeriodInMinutes configuration parameter to force
    flushing of infrequently-updated ColumnFamilies
-
-
