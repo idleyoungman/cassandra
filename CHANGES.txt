@@ -1,3 +1,6 @@
+4.0.10-newrelic-v1
+ * Add a new column family option: hint_time_to_live_seconds
+ 
 4.0.10
  * Improve nodetool enable{audit,fullquery}log (CASSANDRA-18550)
  * Report network cache info in nodetool (CASSANDRa-18400)
