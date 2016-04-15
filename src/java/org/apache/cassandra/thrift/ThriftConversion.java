@@ -274,6 +274,8 @@ public class ThriftConversion
                 newCFMD.minIndexInterval(cf_def.min_index_interval);
             if (cf_def.isSetMax_index_interval())
                 newCFMD.maxIndexInterval(cf_def.max_index_interval);
+            if (cf_def.isSetHint_time_to_live_seconds())
+                newCFMD.hintTimeToLiveSeconds(cf_def.hint_time_to_live_seconds);
             if (cf_def.isSetSpeculative_retry())
                 newCFMD.speculativeRetry(CFMetaData.SpeculativeRetry.fromString(cf_def.speculative_retry));
             if (cf_def.isSetTriggers())
@@ -324,6 +326,8 @@ public class ThriftConversion
             // ensure the max is at least as large as the min
             cf_def.setMax_index_interval(Math.max(cf_def.min_index_interval, CFMetaData.DEFAULT_MAX_INDEX_INTERVAL));
         }
+        if (!cf_def.isSetHint_time_to_live_seconds())
+            cf_def.setHint_time_to_live_seconds(CFMetaData.DEFAULT_HINT_TIME_TO_LIVE_SECONDS);
     }
 
     /**
@@ -385,6 +389,7 @@ public class ThriftConversion
         def.setBloom_filter_fp_chance(cfm.getBloomFilterFpChance());
         def.setMin_index_interval(cfm.getMinIndexInterval());
         def.setMax_index_interval(cfm.getMaxIndexInterval());
+        def.setHint_time_to_live_seconds(cfm.getHintTimeToLiveSeconds());
         def.setMemtable_flush_period_in_ms(cfm.getMemtableFlushPeriod());
         def.setCaching(cfm.getCaching().toThriftCaching());
         def.setCells_per_row_to_cache(cfm.getCaching().toThriftCellsPerRow());
