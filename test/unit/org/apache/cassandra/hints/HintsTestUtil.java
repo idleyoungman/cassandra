@@ -55,6 +55,6 @@ final class HintsTestUtil
         for (PartitionUpdate partitionUpdate : expected.mutation.getPartitionUpdates())
             assertPartitionsEqual(partitionUpdate, actual.mutation.getPartitionUpdate(partitionUpdate.metadata().cfId));
         assertEquals(expected.creationTime, actual.creationTime);
-        assertEquals(expected.gcgs, actual.gcgs);
+        assertEquals(expected.ttl, actual.ttl);
     }
 }

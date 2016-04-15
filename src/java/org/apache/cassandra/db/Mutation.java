@@ -37,6 +37,7 @@ import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.net.MessageOut;
 import org.apache.cassandra.net.MessagingService;
+import org.apache.cassandra.schema.TableParams;
 import org.apache.cassandra.utils.ByteBufferUtil;
 
 // TODO convert this to a Builder pattern instead of encouraging M.add directly,
@@ -254,6 +255,20 @@ public class Mutation implements IMutation
         for (PartitionUpdate update : getPartitionUpdates())
             gcgs = Math.min(gcgs, update.metadata().params.gcGraceSeconds);
         return gcgs;
+    }
+
+    public int smallestHintTTL()
+    {
+        int ttl = Integer.MAX_VALUE;
+        for (PartitionUpdate update : getPartitionUpdates())
+        {
+            int hintTtl = update.metadata().params.hintTimeToLiveSeconds;
+            if (hintTtl == TableParams.DEFAULT_HINT_TIME_TO_LIVE_SECONDS)
+                hintTtl = update.metadata().params.gcGraceSeconds;
+
+            ttl = Math.min(ttl, hintTtl);
+        }
+        return ttl;
     }
 
     public String toString()
