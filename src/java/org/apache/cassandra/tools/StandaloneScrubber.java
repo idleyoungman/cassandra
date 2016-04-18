@@ -50,6 +50,7 @@ public class StandaloneScrubber
     private static final String MANIFEST_CHECK_OPTION  = "manifest-check";
     private static final String SKIP_CORRUPTED_OPTION = "skip-corrupted";
     private static final String NO_VALIDATE_OPTION = "no-validate";
+    private static final String SSTABLE_OPTION = "sstable";
 
     public static void main(String args[])
     {
@@ -89,31 +90,54 @@ public class StandaloneScrubber
 
             List<SSTableReader> sstables = new ArrayList<>();
 
-            // Scrub sstables
-            for (Map.Entry<Descriptor, Set<Component>> entry : lister.list().entrySet())
-            {
-                Set<Component> components = entry.getValue();
-                if (!components.contains(Component.DATA))
-                    continue;
+            if (options.sstable != null && !options.sstable.isEmpty()) {
+                System.out.println("Scrubbing " + options.sstable);
 
                 try
                 {
-                    SSTableReader sstable = SSTableReader.openNoValidation(entry.getKey(), components, cfs);
+                    String ssTableFileName = new File(options.sstable).getAbsolutePath();
+                    Descriptor descriptor = Descriptor.fromFilename(ssTableFileName);
+                    keyspace = Keyspace.openWithoutSSTables(descriptor.ksname);
+                    cfs = keyspace.getColumnFamilyStore(descriptor.cfname);
+                    SSTableReader sstable = SSTableReader.open(descriptor);
                     sstables.add(sstable);
-
-                    File snapshotDirectory = Directories.getSnapshotDirectory(sstable.descriptor, snapshotName);
-                    sstable.createLinks(snapshotDirectory.getPath());
-
                 }
                 catch (Exception e)
                 {
                     JVMStabilityInspector.inspectThrowable(e);
-                    System.err.println(String.format("Error Loading %s: %s", entry.getKey(), e.getMessage()));
+                    System.err.println(String.format("Error Loading %s: %s", options.sstable, e.getMessage()));
                     if (options.debug)
                         e.printStackTrace(System.err);
                 }
             }
-            System.out.println(String.format("Pre-scrub sstables snapshotted into snapshot %s", snapshotName));
+            else
+            {
+                System.out.println("Full Scrub");
+
+                for (Map.Entry<Descriptor, Set<Component>> entry : lister.list().entrySet())
+                {
+                    Set<Component> components = entry.getValue();
+                    if (!components.contains(Component.DATA))
+                        continue;
+
+                    try
+                    {
+                        SSTableReader sstable = SSTableReader.openNoValidation(entry.getKey(), components, cfs);
+                        sstables.add(sstable);
+
+                        File snapshotDirectory = Directories.getSnapshotDirectory(sstable.descriptor, snapshotName);
+                        sstable.createLinks(snapshotDirectory.getPath());
+                    }
+                    catch (Exception e)
+                    {
+                        JVMStabilityInspector.inspectThrowable(e);
+                        System.err.println(String.format("Error Loading %s: %s", entry.getKey(), e.getMessage()));
+                        if (options.debug)
+                            e.printStackTrace(System.err);
+                    }
+                }
+                System.out.println(String.format("Pre-scrub sstables snapshotted into snapshot %s", snapshotName));
+            }
 
             if (!options.manifestCheckOnly)
             {
@@ -199,6 +223,7 @@ public class StandaloneScrubber
         public boolean manifestCheckOnly;
         public boolean skipCorrupted;
         public boolean noValidate;
+        public String sstable;
 
         private Options(String keyspaceName, String cfName)
         {
@@ -221,16 +246,14 @@ public class StandaloneScrubber
                 }
 
                 String[] args = cmd.getArgs();
-                if (args.length != 2)
-                {
-                    String msg = args.length < 2 ? "Missing arguments" : "Too many arguments";
-                    System.err.println(msg);
-                    printUsage(options);
-                    System.exit(1);
-                }
+                String keyspaceName = null;
+                String cfName = null;
 
-                String keyspaceName = args[0];
-                String cfName = args[1];
+                if (args.length == 2)
+                {
+                    keyspaceName = args[0];
+                    cfName = args[1];
+                }
 
                 Options opts = new Options(keyspaceName, cfName);
 
@@ -239,6 +262,14 @@ public class StandaloneScrubber
                 opts.manifestCheckOnly = cmd.hasOption(MANIFEST_CHECK_OPTION);
                 opts.skipCorrupted = cmd.hasOption(SKIP_CORRUPTED_OPTION);
                 opts.noValidate = cmd.hasOption(NO_VALIDATE_OPTION);
+                opts.sstable = cmd.getOptionValue(SSTABLE_OPTION);
+
+                if (keyspaceName == null && (opts.sstable == null || opts.sstable.length() < 1)) {
+                    String msg = args.length < 2 ? "Missing arguments" : "Too many arguments";
+                    System.err.println(msg);
+                    printUsage(options);
+                    System.exit(1);
+                }
 
                 return opts;
             }
@@ -265,6 +296,11 @@ public class StandaloneScrubber
             options.addOption("m",  MANIFEST_CHECK_OPTION, "only check and repair the leveled manifest, without actually scrubbing the sstables");
             options.addOption("s",  SKIP_CORRUPTED_OPTION, "skip corrupt rows in counter tables");
             options.addOption("n",  NO_VALIDATE_OPTION,    "do not validate columns using column validator");
+            options.addOption(OptionBuilder.withArgName("file")
+                                           .hasArg()
+                                           .withDescription("table to scrub")
+                                           .withLongOpt(SSTABLE_OPTION)
+                                           .create("f"));
             return options;
         }
 

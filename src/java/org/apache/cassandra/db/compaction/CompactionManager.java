@@ -52,6 +52,7 @@ import org.apache.cassandra.dht.Bounds;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
 import org.apache.cassandra.index.SecondaryIndexBuilder;
+import org.apache.cassandra.io.sstable.Component;
 import org.apache.cassandra.io.sstable.Descriptor;
 import org.apache.cassandra.io.sstable.ISSTableScanner;
 import org.apache.cassandra.io.sstable.IndexSummaryRedistribution;
@@ -349,15 +350,47 @@ public class CompactionManager implements CompactionManagerMBean
         }
     }
 
-    public AllSSTableOpStatus performScrub(final ColumnFamilyStore cfs, final boolean skipCorrupted, final boolean checkData, int jobs)
+    public AllSSTableOpStatus performScrub(final ColumnFamilyStore cfs, final boolean skipCorrupted, final boolean checkData, int jobs, String dataFiles)
     throws InterruptedException, ExecutionException
     {
+        final List<String> filenames = Lists.newArrayList();
+
+        // dataFiles will be null if we want all tables to be scrubbed
+        if (dataFiles != null) {
+            for (String file : dataFiles.split(","))
+            {
+                // Paranoid check and cleaning data
+                filenames.add(file.trim());
+            }
+        }
+
         return parallelAllSSTableOperation(cfs, new OneSSTableOperation()
         {
             @Override
             public Iterable<SSTableReader> filterSSTables(LifecycleTransaction input)
             {
-                return input.originals();
+                if (filenames.isEmpty())
+                {
+                    logger.info("Scrubbing all sstables in {}", cfs);
+                    return input.originals();
+                }
+
+                logger.info("Filtering sstables to scrub in {} to only include {}", cfs, filenames);
+
+                Iterable<SSTableReader> sstables = new ArrayList<>(input.originals());
+                Iterator<SSTableReader> iter = sstables.iterator();
+                while (iter.hasNext())
+                {
+                    SSTableReader sstable = iter.next();
+                    if (filenames.contains(sstable.descriptor.relativeFilenameFor(Component.DATA)))
+                    {
+                        input.cancel(sstable);
+                        iter.remove();
+                    }
+                }
+
+                logger.info("Scrubbing sstables {}", sstables);
+                return sstables;
             }
 
             @Override

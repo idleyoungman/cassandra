@@ -53,9 +53,16 @@ public class Scrub extends NodeToolCmd
             description = "Number of sstables to scrub simultanously, set to 0 to use all available compaction threads")
     private int jobs = 2;
 
+    @Option(title = "sstables",
+                    name = {"-f", "--sstables"},
+                    description = "A comma delimited list of sstables to scrub")
+    private String sstables = null;
+
     @Override
     public void execute(NodeProbe probe)
     {
+        // NOTE: currently this requires us to include both the keyspace and the columnfamily names, even though they're
+        // this information can be obtained from the sstable name. It would requires more code down stream to change.
         List<String> keyspaces = parseOptionalKeyspace(args, probe);
         String[] tableNames = parseOptionalTables(args);
 
@@ -63,7 +70,7 @@ public class Scrub extends NodeToolCmd
         {
             try
             {
-                probe.scrub(System.out, disableSnapshot, skipCorrupted, !noValidation, jobs, keyspace, tableNames);
+                probe.scrub(System.out, disableSnapshot, skipCorrupted, !noValidation, jobs, sstables, keyspace, tableNames);
             }
             catch (IllegalArgumentException e)
             {
