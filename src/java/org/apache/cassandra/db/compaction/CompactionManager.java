@@ -327,21 +327,53 @@ public class CompactionManager implements CompactionManagerMBean
         }
     }
 
-    public AllSSTableOpStatus performScrub(final ColumnFamilyStore cfs, final boolean skipCorrupted, final boolean checkData)
+    public AllSSTableOpStatus performScrub(final ColumnFamilyStore cfs, final boolean skipCorrupted, final boolean checkData, final String dataFiles)
     throws InterruptedException, ExecutionException
     {
-        return performScrub(cfs, skipCorrupted, checkData, false);
+        return performScrub(cfs, skipCorrupted, checkData, false, dataFiles);
     }
 
-    public AllSSTableOpStatus performScrub(final ColumnFamilyStore cfs, final boolean skipCorrupted, final boolean checkData, final boolean offline)
+    public AllSSTableOpStatus performScrub(final ColumnFamilyStore cfs, final boolean skipCorrupted, final boolean checkData, final boolean offline, final String dataFiles)
     throws InterruptedException, ExecutionException
     {
+        final List<String> filenames = Lists.newArrayList();
+
+        // dataFiles will be null if we want all tables to be scrubbed
+        if (dataFiles != null) {
+            for (String file : dataFiles.split(","))
+            {
+                // Paranoid check and cleaning data
+                filenames.add(file.trim());
+            }
+        }
+
         return parallelAllSSTableOperation(cfs, new OneSSTableOperation()
         {
             @Override
             public Iterable<SSTableReader> filterSSTables(LifecycleTransaction input)
             {
-                return input.originals();
+                if (filenames.isEmpty())
+                {
+                    logger.info("Scrubbing all sstables in {}", cfs);
+                    return input.originals();
+                }
+
+                logger.info("Filtering sstables to scrub in {} to only include {}", cfs, filenames);
+
+                Iterable<SSTableReader> sstables = new ArrayList<>(input.originals());
+                Iterator<SSTableReader> iter = sstables.iterator();
+                while (iter.hasNext())
+                {
+                    SSTableReader sstable = iter.next();
+                    if (filenames.contains(sstable.descriptor.relativeFilenameFor(Component.DATA)))
+                    {
+                        input.cancel(sstable);
+                        iter.remove();
+                    }
+                }
+
+                logger.info("Scrubbing sstables {}", sstables);
+                return sstables;
             }
 
             @Override
