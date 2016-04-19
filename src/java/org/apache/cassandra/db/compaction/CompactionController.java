@@ -54,17 +54,22 @@ public class CompactionController implements AutoCloseable
     private Refs<SSTableReader> overlappingSSTables;
     private OverlapIterator<PartitionPosition, SSTableReader> overlapIterator;
     private final Iterable<SSTableReader> compacting;
-
+    private boolean ignoreOverlap;
     public final int gcBefore;
 
     protected CompactionController(ColumnFamilyStore cfs, int maxValue)
     {
-        this(cfs, null, maxValue);
+        this(cfs, null, maxValue, false);
     }
 
-    public CompactionController(ColumnFamilyStore cfs, Set<SSTableReader> compacting, int gcBefore)
+    public CompactionController(ColumnFamilyStore cfs, Set<SSTableReader> compacting,  int gcBefore) {
+        this(cfs, compacting, gcBefore, false);
+    }
+
+    public CompactionController(ColumnFamilyStore cfs, Set<SSTableReader> compacting, int gcBefore, boolean ignoreOverlap)
     {
         assert cfs != null;
+        this.ignoreOverlap = ignoreOverlap;
         this.cfs = cfs;
         this.gcBefore = gcBefore;
         this.compacting = compacting;
@@ -206,6 +211,12 @@ public class CompactionController implements AutoCloseable
             return Long.MIN_VALUE;
 
         long min = Long.MAX_VALUE;
+
+        // Ignore timestamp overlap and drop tombstones
+        if (ignoreOverlap) {
+            return min;
+        }
+
         overlapIterator.update(key);
         for (SSTableReader sstable : overlapIterator.overlaps())
         {

@@ -50,25 +50,27 @@ public class CompactionTask extends AbstractCompactionTask
     protected static final Logger logger = LoggerFactory.getLogger(CompactionTask.class);
     protected final int gcBefore;
     protected final boolean keepOriginals;
+    protected final boolean ignoreOverlapCheck;
     protected static long totalBytesCompacted = 0;
     private CompactionExecutorStatsCollector collector;
 
     public CompactionTask(ColumnFamilyStore cfs, LifecycleTransaction txn, int gcBefore)
     {
-        this(cfs, txn, gcBefore, false);
+        this(cfs, txn, gcBefore, false, false, false);
     }
 
     @Deprecated
     public CompactionTask(ColumnFamilyStore cfs, LifecycleTransaction txn, int gcBefore, boolean offline, boolean keepOriginals)
     {
-        this(cfs, txn, gcBefore, keepOriginals);
+        this(cfs, txn, gcBefore, offline, keepOriginals, false);
     }
 
-    public CompactionTask(ColumnFamilyStore cfs, LifecycleTransaction txn, int gcBefore, boolean keepOriginals)
+    public CompactionTask(ColumnFamilyStore cfs, LifecycleTransaction txn, int gcBefore, boolean offline, boolean keepOriginals, boolean ignoreOverlapCheck)
     {
         super(cfs, txn);
         this.gcBefore = gcBefore;
         this.keepOriginals = keepOriginals;
+        this.ignoreOverlapCheck = ignoreOverlapCheck;
     }
 
     public static synchronized long addToTotalBytesCompacted(long bytesCompacted)
@@ -303,7 +305,7 @@ public class CompactionTask extends AbstractCompactionTask
 
     protected CompactionController getCompactionController(Set<SSTableReader> toCompact)
     {
-        return new CompactionController(cfs, toCompact, gcBefore);
+        return new CompactionController(cfs, toCompact, gcBefore, ignoreOverlapCheck);
     }
 
     protected boolean partialCompactionsAcceptable()
