@@ -48,9 +48,16 @@ public class Scrub extends NodeToolCmd
                    description = "Do not validate columns using column validator")
     private boolean noValidation = false;
 
+    @Option(title = "sstables",
+                    name = {"-f", "--sstables"},
+                    description = "A comma delimited list of sstables to scrub")
+    private String sstables = null;
+
     @Override
     public void execute(NodeProbe probe)
     {
+        // NOTE: currently this requires us to include both the keyspace and the columnfamily names, even though they're
+        // this information can be obtained from the sstable name. It would requires more code down stream to change.
         List<String> keyspaces = parseOptionalKeyspace(args, probe);
         String[] cfnames = parseOptionalColumnFamilies(args);
 
@@ -58,7 +65,7 @@ public class Scrub extends NodeToolCmd
         {
             try
             {
-                probe.scrub(System.out, disableSnapshot, skipCorrupted, !noValidation, keyspace, cfnames);
+                probe.scrub(System.out, disableSnapshot, skipCorrupted, !noValidation, sstables, keyspace, cfnames);
             } catch (IllegalArgumentException e)
             {
                 throw e;
