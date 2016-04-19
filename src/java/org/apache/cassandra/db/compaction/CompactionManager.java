@@ -327,13 +327,13 @@ public class CompactionManager implements CompactionManagerMBean
         }
     }
 
-    public AllSSTableOpStatus performScrub(final ColumnFamilyStore cfs, final boolean skipCorrupted, final boolean checkData, final String dataFiles)
+    public AllSSTableOpStatus performScrub(final ColumnFamilyStore cfs, final boolean skipCorrupted, final boolean checkData, final String dataFiles, final boolean ignoreOverlap)
     throws InterruptedException, ExecutionException
     {
-        return performScrub(cfs, skipCorrupted, checkData, false, dataFiles);
+        return performScrub(cfs, skipCorrupted, checkData, false, dataFiles, ignoreOverlap);
     }
 
-    public AllSSTableOpStatus performScrub(final ColumnFamilyStore cfs, final boolean skipCorrupted, final boolean checkData, final boolean offline, final String dataFiles)
+    public AllSSTableOpStatus performScrub(final ColumnFamilyStore cfs, final boolean skipCorrupted, final boolean checkData, final boolean offline, final String dataFiles, final boolean ignoreOverlap)
     throws InterruptedException, ExecutionException
     {
         final List<String> filenames = Lists.newArrayList();
@@ -379,7 +379,7 @@ public class CompactionManager implements CompactionManagerMBean
             @Override
             public void execute(LifecycleTransaction input) throws IOException
             {
-                scrubOne(cfs, input, skipCorrupted, checkData, offline);
+                scrubOne(cfs, input, skipCorrupted, checkData, offline, ignoreOverlap);
             }
         }, OperationType.SCRUB);
     }
@@ -737,11 +737,11 @@ public class CompactionManager implements CompactionManagerMBean
         }
     }
 
-    private void scrubOne(ColumnFamilyStore cfs, LifecycleTransaction modifier, boolean skipCorrupted, boolean checkData, boolean offline) throws IOException
+    private void scrubOne(ColumnFamilyStore cfs, LifecycleTransaction modifier, boolean skipCorrupted, boolean checkData, boolean offline, boolean ignoreOverlap) throws IOException
     {
         CompactionInfo.Holder scrubInfo = null;
 
-        try (Scrubber scrubber = new Scrubber(cfs, modifier, skipCorrupted, offline, checkData))
+        try (Scrubber scrubber = new Scrubber(cfs, modifier, skipCorrupted, new OutputHandler.LogOutput(), false, checkData, ignoreOverlap))
         {
             scrubInfo = scrubber.getScrubInfo();
             metrics.beginCompaction(scrubInfo);
