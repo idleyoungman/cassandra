@@ -85,7 +85,8 @@ public final class SystemDistributedKeyspace
                      + "status text,"
                      + "started_at timestamp,"
                      + "finished_at timestamp,"
-                     + "PRIMARY KEY ((keyspace_name, columnfamily_name), id))");
+                     + "PRIMARY KEY ((keyspace_name, columnfamily_name), id)) "
+                     + "WITH default_time_to_live = 2592000");
 
     private static final CFMetaData ParentRepairHistory =
         compile(PARENT_REPAIR_HISTORY,
@@ -101,7 +102,8 @@ public final class SystemDistributedKeyspace
                      + "requested_ranges set<text>,"
                      + "successful_ranges set<text>,"
                      + "options map<text, text>,"
-                     + "PRIMARY KEY (parent_id))");
+                     + "PRIMARY KEY (parent_id)) "
+                     + "WITH default_time_to_live = 2592000");
 
     private static final CFMetaData ViewBuildStatus =
     compile(VIEW_BUILD_STATUS,
