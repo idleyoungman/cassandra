@@ -1,3 +1,12 @@
+3.7-newrelic-v1
+ * Add a new column family option: hint_time_to_live_seconds
+ * Import TWCS from Jeff Jirsa
+ * Add compaction preference high tombstone ratio SSTables in TWCS
+ * Allow targeting single tables in scrubs
+ * Allow ignoring overlap checks when creating compaction tasks
+ * Set the default TTL for repair history tables to 30 days
+
+
 3.7
  * Support multiple folders for user defined compaction tasks (CASSANDRA-11765)
  * Fix race in CompactionStrategyManager's pause/resume (CASSANDRA-11922)
