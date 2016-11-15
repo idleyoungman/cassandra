@@ -34,6 +34,7 @@ import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.Memtable;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.AsciiType;
+import org.apache.cassandra.db.marshal.CompositeType;
 import org.apache.cassandra.db.marshal.UTF8Type;
 import org.apache.cassandra.db.rows.Cell;
 import org.apache.cassandra.db.rows.Row;
@@ -101,7 +102,7 @@ public class ColumnIndex
 
     public long index(DecoratedKey key, Row row)
     {
-        return getCurrentMemtable().index(key, getValueOf(column, row, FBUtilities.nowInSeconds()));
+        return getCurrentMemtable().index(key, getValueOf(keyValidator, column, key, row, FBUtilities.nowInSeconds()));
     }
 
     public void switchMemtable()
@@ -224,7 +225,7 @@ public class ColumnIndex
 
     }
 
-    public static ByteBuffer getValueOf(ColumnDefinition column, Row row, int nowInSecs)
+    public static ByteBuffer getValueOf(AbstractType<?> keyValidator, ColumnDefinition column, DecoratedKey key, Row row, int nowInSecs)
     {
         if (row == null)
             return null;
@@ -242,7 +243,19 @@ public class ColumnIndex
             case REGULAR:
                 Cell cell = row.getCell(column);
                 return cell == null || !cell.isLive(nowInSecs) ? null : cell.value();
-
+            case PARTITION_KEY:
+                if (row.primaryKeyLivenessInfo().isLive(nowInSecs))
+                {
+                    if (keyValidator instanceof CompositeType)
+                    {
+                        return ((CompositeType) keyValidator).split(key.getKey())[column.position()];
+                    }
+                    else
+                    {
+                        return key.getKey();
+                    }
+                }
+                return null;
             default:
                 return null;
         }

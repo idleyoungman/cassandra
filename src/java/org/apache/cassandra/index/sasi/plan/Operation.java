@@ -24,6 +24,7 @@ import java.util.*;
 import org.apache.cassandra.config.ColumnDefinition;
 import org.apache.cassandra.config.ColumnDefinition.Kind;
 import org.apache.cassandra.cql3.Operator;
+import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.filter.RowFilter;
 import org.apache.cassandra.db.rows.Row;
 import org.apache.cassandra.db.rows.Unfiltered;
@@ -92,7 +93,7 @@ public class Operation extends RangeIterator<Long, Token>
      * and data from the lower level members using depth-first search
      * and bubbling the results back to the top level caller.
      *
-     * Most of the work here is done by {@link #localSatisfiedBy(Unfiltered, Row, boolean)}
+     * Most of the work here is done by {@link #localSatisfiedBy(DecoratedKey, Unfiltered, Row, boolean)}
      * see it's comment for details, if there are no local expressions
      * assigned to Operation it will call satisfiedBy(Row) on it's children.
      *
@@ -120,20 +121,21 @@ public class Operation extends RangeIterator<Long, Token>
      * Level #2 computes AND between "first_name" and result of level #3, AND (state, country) which is already computed
      * Level #1 does OR between results of AND (first_name) and AND (state, country) and returns final result.
      *
+     * @param key The partition key of the row to check.
      * @param currentCluster The row cluster to check.
      * @param staticRow The static row associated with current cluster.
      * @param allowMissingColumns allow columns value to be null.
      * @return true if give Row satisfied all of the expressions in the tree,
      *         false otherwise.
      */
-    public boolean satisfiedBy(Unfiltered currentCluster, Row staticRow, boolean allowMissingColumns)
+    public boolean satisfiedBy(DecoratedKey key, Unfiltered currentCluster, Row staticRow, boolean allowMissingColumns)
     {
         boolean sideL, sideR;
 
         if (expressions == null || expressions.isEmpty())
         {
-            sideL =  left != null &&  left.satisfiedBy(currentCluster, staticRow, allowMissingColumns);
-            sideR = right != null && right.satisfiedBy(currentCluster, staticRow, allowMissingColumns);
+            sideL =  left != null &&  left.satisfiedBy(key, currentCluster, staticRow, allowMissingColumns);
+            sideR = right != null && right.satisfiedBy(key, currentCluster, staticRow, allowMissingColumns);
 
             // one of the expressions was skipped
             // because it had no indexes attached
@@ -142,14 +144,14 @@ public class Operation extends RangeIterator<Long, Token>
         }
         else
         {
-            sideL = localSatisfiedBy(currentCluster, staticRow, allowMissingColumns);
+            sideL = localSatisfiedBy(key, currentCluster, staticRow, allowMissingColumns);
 
             // if there is no right it means that this expression
             // is last in the sequence, we can just return result from local expressions
             if (right == null)
                 return sideL;
 
-            sideR = right.satisfiedBy(currentCluster, staticRow, allowMissingColumns);
+            sideR = right.satisfiedBy(key, currentCluster, staticRow, allowMissingColumns);
         }
 
 
@@ -198,7 +200,7 @@ public class Operation extends RangeIterator<Long, Token>
      * @return true if give Row satisfied all of the analyzed expressions,
      *         false otherwise.
      */
-    private boolean localSatisfiedBy(Unfiltered currentCluster, Row staticRow, boolean allowMissingColumns)
+    private boolean localSatisfiedBy(DecoratedKey key, Unfiltered currentCluster, Row staticRow, boolean allowMissingColumns)
     {
         if (currentCluster == null || !currentCluster.isRow())
             return false;
@@ -209,10 +211,7 @@ public class Operation extends RangeIterator<Long, Token>
 
         for (ColumnDefinition column : expressions.keySet())
         {
-            if (column.kind == Kind.PARTITION_KEY)
-                continue;
-
-            ByteBuffer value = ColumnIndex.getValueOf(column, column.kind == Kind.STATIC ? staticRow : (Row) currentCluster, now);
+            ByteBuffer value = ColumnIndex.getValueOf(controller.getKeyValidator(), column, key, column.kind == Kind.STATIC ? staticRow : (Row) currentCluster, now);
             boolean isMissingColumn = value == null;
 
             if (!allowMissingColumns && isMissingColumn)

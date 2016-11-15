@@ -645,6 +645,49 @@ public class SchemaLoader
         return cfm;
     }
 
+    public static CFMetaData partioningKeySASICFMD(String ksName, String cfName)
+    {
+        CFMetaData cfm = CFMetaData.Builder.create(ksName, cfName)
+                                           .addPartitionKey("sensor_id", Int32Type.instance)
+                                           .addRegularColumn("value", DoubleType.instance)
+                                           .build();
+
+        Indexes indexes = cfm.getIndexes();
+        indexes = indexes.with(IndexMetadata.fromSchemaMetadata("sensor_id", IndexMetadata.Kind.CUSTOM, new HashMap<String, String>()
+        {{
+            put(IndexTarget.CUSTOM_INDEX_OPTION_NAME, SASIIndex.class.getName());
+            put(IndexTarget.TARGET_OPTION_NAME, "sensor_id");
+            put("mode", OnDiskIndexBuilder.Mode.PREFIX.toString());
+            put("analyzer_class", "org.apache.cassandra.index.sasi.analyzer.NonTokenizingAnalyzer");
+            put("case_sensitive", "false");
+        }}));
+
+        cfm.indexes(indexes);
+        return cfm;
+    }
+
+    public static CFMetaData partioningCompositeKeySASICFMD(String ksName, String cfName)
+    {
+        CFMetaData cfm = CFMetaData.Builder.create(ksName, cfName)
+                                           .addPartitionKey("sensor_id", Int32Type.instance)
+                                           .addPartitionKey("date", TimestampType.instance)
+                                           .addRegularColumn("value", DoubleType.instance)
+                                           .build();
+
+        Indexes indexes = cfm.getIndexes();
+        indexes = indexes.with(IndexMetadata.fromSchemaMetadata("date", IndexMetadata.Kind.CUSTOM, new HashMap<String, String>()
+        {{
+            put(IndexTarget.CUSTOM_INDEX_OPTION_NAME, SASIIndex.class.getName());
+            put(IndexTarget.TARGET_OPTION_NAME, "date");
+            put("mode", OnDiskIndexBuilder.Mode.PREFIX.toString());
+            put("analyzer_class", "org.apache.cassandra.index.sasi.analyzer.NonTokenizingAnalyzer");
+            put("case_sensitive", "false");
+        }}));
+
+        cfm.indexes(indexes);
+        return cfm;
+    }
+
     public static CompressionParams getCompressionParameters()
     {
         return getCompressionParameters(null);

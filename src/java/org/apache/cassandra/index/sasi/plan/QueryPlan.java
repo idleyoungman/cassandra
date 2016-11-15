@@ -118,7 +118,7 @@ public class QueryPlan
                         while (partition.hasNext())
                         {
                             Unfiltered row = partition.next();
-                            if (operationTree.satisfiedBy(row, staticRow, true))
+                            if (operationTree.satisfiedBy(key, row, staticRow, true))
                                 clusters.add(row);
                         }
 

@@ -117,7 +117,7 @@ public class PerSSTableIndexWriter implements SSTableFlushObserver
         Row row = (Row) unfiltered;
 
         supportedIndexes.keySet().forEach((column) -> {
-            ByteBuffer value = ColumnIndex.getValueOf(column, row, nowInSec);
+            ByteBuffer value = ColumnIndex.getValueOf(keyValidator, column, currentKey, row, nowInSec);
             if (value == null)
                 return;
 
