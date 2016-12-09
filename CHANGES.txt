@@ -1,3 +1,7 @@
+3.7-newrelic-v4
+Partially backported from from 3.x
+ * Enable partition component index for SASI (CASSANDRA-11734)
+
 3.7-newrelic-v3
 Merged from 3.9
  * Increase size of flushExecutor thread pool (CASSANDRA-12071)
