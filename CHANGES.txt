@@ -1,3 +1,6 @@
+3.7-newrelic-v6
+ * Install JIT compiler command file in Debian package (CASSANDRA-13092)
+
 3.7-newrelic-v5
 Merged from 3.0.10:
  * Add system property to set the max number of native transport requests in queue (CASSANDRA-11363)
