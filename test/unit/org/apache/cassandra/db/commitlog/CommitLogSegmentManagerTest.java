@@ -1,7 +1,9 @@
 package org.apache.cassandra.db.commitlog;
 
+import java.io.File;
 import java.nio.ByteBuffer;
 import java.util.Random;
+import java.util.UUID;
 import java.util.concurrent.Semaphore;
 
 import javax.naming.ConfigurationException;
@@ -96,5 +98,33 @@ public class CommitLogSegmentManagerTest
         clsm.getActiveSegments().forEach( segment -> clsm.recycleSegment(segment));
 
         Util.spinAssertEquals(3, () -> clsm.getActiveSegments().size(), 5);
+    }
+
+    @Test
+    @BMRule(name = "Make removing commitlog segments slow",
+            targetClass = "CommitLogSegment",
+            targetMethod = "discard",
+            action = "Thread.sleep(50)")
+    public void testShutdownWithPendingTasks() throws Throwable {
+        CommitLog.instance.resetUnsafe(true);
+        ColumnFamilyStore cfs1 = Keyspace.open(KEYSPACE1).getColumnFamilyStore(STANDARD1);
+
+        final Mutation m = new RowUpdateBuilder(cfs1.metadata, 0, "k")
+                           .clustering("bytes")
+                           .add("val", ByteBuffer.wrap(entropy))
+                           .build();
+
+        // force creating several commitlog files
+        for (int i = 0; i < 10; i++) {
+            CommitLog.instance.add(m);
+        }
+
+        // schedule discarding completed segments and immediately issue a shutdown
+        UUID cfid = m.getColumnFamilyIds().iterator().next();
+        CommitLog.instance.discardCompletedSegments(cfid, CommitLog.instance.getContext());
+        CommitLog.instance.shutdownBlocking();
+
+        // the shutdown should block until all logs except the currently active one and perhaps a new, empty one are gone
+        Assert.assertTrue(new File(CommitLog.instance.location).listFiles().length <= 2);
     }
 }
