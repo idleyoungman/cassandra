@@ -1,3 +1,10 @@
+3.7-newrelic-v8
+Merged from 3.10:
+ * Tune compaction thread count via nodetool (CASSANDRA-12248)
+
+3.7-newrelic-v7
+ * Wait for all management tasks to complete before shutting down CLSM (CASSANDRA-13123)
+
 3.7-newrelic-v6
  * Install JIT compiler command file in Debian package (CASSANDRA-13092)
 
