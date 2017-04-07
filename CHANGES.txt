@@ -1,3 +1,7 @@
+3.7-newrelic-v9
+Merged from 3.8:
+ * Backported 1e92ce43a5a730f81d3f6cfd72e7f4b126db788a to address streaming histogram CPU usage
+
 3.7-newrelic-v8
 Merged from 3.10:
  * Tune compaction thread count via nodetool (CASSANDRA-12248)

@@ -330,9 +330,10 @@ public class BTreeRow extends AbstractRow
             if (cd.column().isSimple())
                 return false;
 
-            if (!((ComplexColumnData)cd).complexDeletion().isLive())
+            if (!((ComplexColumnData) cd).complexDeletion().isLive())
                 return true;
         }
+
         return false;
     }
 
@@ -643,7 +644,7 @@ public class BTreeRow extends AbstractRow
         protected Deletion deletion = Deletion.LIVE;
 
         private final boolean isSorted;
-        private final BTree.Builder<Cell> cells;
+        private BTree.Builder<Cell> cells_;
         private final CellResolver resolver;
         private boolean hasComplex = false;
 
@@ -656,10 +657,19 @@ public class BTreeRow extends AbstractRow
 
         protected Builder(boolean isSorted, int nowInSecs)
         {
-            this.cells = BTree.builder(ColumnData.comparator);
+            cells_ = null;
             resolver = new CellResolver(nowInSecs);
             this.isSorted = isSorted;
-            this.cells.auto(false);
+        }
+
+        private BTree.Builder<Cell> getCells()
+        {
+            if (cells_ == null)
+            {
+                cells_ = BTree.builder(ColumnData.comparator);
+                cells_.auto(false);
+            }
+            return cells_;
         }
 
         public boolean isSorted()
@@ -683,7 +693,7 @@ public class BTreeRow extends AbstractRow
             this.clustering = null;
             this.primaryKeyLivenessInfo = LivenessInfo.EMPTY;
             this.deletion = Deletion.LIVE;
-            this.cells.reuse();
+            this.cells_ = null;
         }
 
         public void addPrimaryKeyLivenessInfo(LivenessInfo info)
@@ -708,25 +718,25 @@ public class BTreeRow extends AbstractRow
             if (deletion.deletes(cell))
                 return;
 
-            cells.add(cell);
+            getCells().add(cell);
             hasComplex |= cell.column.isComplex();
         }
 
         public void addComplexDeletion(ColumnDefinition column, DeletionTime complexDeletion)
         {
-            cells.add(new ComplexColumnDeletion(column, complexDeletion));
+            getCells().add(new ComplexColumnDeletion(column, complexDeletion));
             hasComplex = true;
         }
 
         public Row build()
         {
             if (!isSorted)
-                cells.sort();
+                getCells().sort();
             // we can avoid resolving if we're sorted and have no complex values
             // (because we'll only have unique simple cells, which are already in their final condition)
             if (!isSorted | hasComplex)
-                cells.resolve(resolver);
-            Object[] btree = cells.build();
+                getCells().resolve(resolver);
+            Object[] btree = getCells().build();
 
             if (deletion.isShadowedBy(primaryKeyLivenessInfo))
                 deletion = Deletion.LIVE;
