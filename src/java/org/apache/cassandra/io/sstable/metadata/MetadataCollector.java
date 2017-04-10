@@ -59,7 +59,7 @@ public class MetadataCollector implements PartitionStatisticsCollector
 
     static StreamingHistogram defaultTombstoneDropTimeHistogram()
     {
-        return new StreamingHistogram(SSTable.TOMBSTONE_HISTOGRAM_BIN_SIZE);
+        return new StreamingHistogram(SSTable.TOMBSTONE_HISTOGRAM_BIN_SIZE, SSTable.TOMBSTONE_HISTOGRAM_SPOOL_SIZE, SSTable.TOMBSTONE_HISTOGRAM_TTL_ROUND_SECONDS);
     }
 
     public static StatsMetadata defaultStatsMetadata()
@@ -218,7 +218,8 @@ public class MetadataCollector implements PartitionStatisticsCollector
     private void updateLocalDeletionTime(int newLocalDeletionTime)
     {
         localDeletionTimeTracker.update(newLocalDeletionTime);
-        estimatedTombstoneDropTime.update(newLocalDeletionTime);
+        if (newLocalDeletionTime != Cell.NO_DELETION_TIME)
+            estimatedTombstoneDropTime.update(newLocalDeletionTime);
     }
 
     private void updateTTL(int newTTL)
