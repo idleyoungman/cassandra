@@ -17,7 +17,9 @@
  */
 package org.apache.cassandra.db.rows;
 
+import java.nio.ByteBuffer;
 import java.security.MessageDigest;
+import java.util.Set;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -36,17 +38,35 @@ public abstract class RowIterators
 
     private RowIterators() {}
 
-    public static void digest(RowIterator iterator, MessageDigest digest)
+    public static void digest(RowIterator iterator, MessageDigest digest, MessageDigest altDigest, Set<ByteBuffer> columnsToExclude)
     {
-        // TODO: we're not computing digest the same way that old nodes so we'll need
-        // to pass the version we're computing the digest for and deal with that.
+        // TODO: we're not computing digest the same way that old nodes. This is
+        // currently ok as this is only used for schema digest and the is no exchange
+        // of schema digest between different versions. If this changes however,
+        // we'll need to agree on a version.
         digest.update(iterator.partitionKey().getKey().duplicate());
-        iterator.columns().digest(digest);
+        iterator.columns().regulars.digest(digest);
+        iterator.columns().statics.digest(digest);
         FBUtilities.updateWithBoolean(digest, iterator.isReverseOrder());
         iterator.staticRow().digest(digest);
 
+        if (altDigest != null)
+        {
+            // Compute the "alternative digest" here.
+            altDigest.update(iterator.partitionKey().getKey().duplicate());
+            iterator.columns().regulars.digest(altDigest, columnsToExclude);
+            iterator.columns().statics.digest(altDigest, columnsToExclude);
+            FBUtilities.updateWithBoolean(altDigest, iterator.isReverseOrder());
+            iterator.staticRow().digest(altDigest, columnsToExclude);
+        }
+
         while (iterator.hasNext())
-            iterator.next().digest(digest);
+        {
+            Row row = iterator.next();
+            row.digest(digest);
+            if (altDigest != null)
+                row.digest(altDigest, columnsToExclude);
+        }
     }
 
     /**

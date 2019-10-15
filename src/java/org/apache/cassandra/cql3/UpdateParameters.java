@@ -116,7 +116,7 @@ public class UpdateParameters
 
     public void addPrimaryKeyLivenessInfo()
     {
-        builder.addPrimaryKeyLivenessInfo(LivenessInfo.create(metadata, timestamp, ttl, nowInSec));
+        builder.addPrimaryKeyLivenessInfo(LivenessInfo.create(timestamp, ttl, nowInSec));
     }
 
     public void addRowDeletion()
@@ -125,7 +125,7 @@ public class UpdateParameters
         // the "compact" one. As such, deleting the row or deleting that single cell is equivalent. We favor the later however
         // because that makes it easier when translating back to the old format layout (for thrift and pre-3.0 backward
         // compatibility) as we don't have to special case for the row deletion. This is also in line with what we used to do pre-3.0.
-        if (metadata.isCompactTable() && builder.clustering() != Clustering.STATIC_CLUSTERING)
+        if (metadata.isCompactTable() && builder.clustering() != Clustering.STATIC_CLUSTERING && !metadata.isSuper())
             addTombstone(metadata.compactValueColumn());
         else
             builder.addRowDeletion(Row.Deletion.regular(deletionTime));
@@ -149,24 +149,33 @@ public class UpdateParameters
     public void addCell(ColumnDefinition column, CellPath path, ByteBuffer value) throws InvalidRequestException
     {
         Cell cell = ttl == LivenessInfo.NO_TTL
-                  ? BufferCell.live(metadata, column, timestamp, value, path)
+                  ? BufferCell.live(column, timestamp, value, path)
                   : BufferCell.expiring(column, timestamp, ttl, nowInSec, value, path);
         builder.addCell(cell);
     }
 
     public void addCounter(ColumnDefinition column, long increment) throws InvalidRequestException
     {
+        addCounter(column, increment, null);
+    }
+
+    public void addCounter(ColumnDefinition column, long increment, CellPath path) throws InvalidRequestException
+    {
         assert ttl == LivenessInfo.NO_TTL;
 
-        // In practice, the actual CounterId (and clock really) that we use doesn't matter, because we will
-        // ignore it in CounterMutation when we do the read-before-write to create the actual value that is
-        // applied. In other words, this is not the actual value that will be written to the memtable
-        // because this will be replaced in CounterMutation.updateWithCurrentValue().
-        // As an aside, since we don't care about the CounterId/clock, we used to only send the incremement,
-        // but that makes things a bit more complex as this means we need to be able to distinguish inside
-        // PartitionUpdate between counter updates that has been processed by CounterMutation and those that
-        // haven't.
-        builder.addCell(BufferCell.live(metadata, column, timestamp, CounterContext.instance().createLocal(increment)));
+        // Because column is a counter, we need the value to be a CounterContext. However, we're only creating a
+        // "counter update", which is a temporary state until we run into 'CounterMutation.updateWithCurrentValue()'
+        // which does the read-before-write and sets the proper CounterId, clock and updated value.
+        //
+        // We thus create a "fake" local shard here. The clock used doesn't matter as this is just a temporary
+        // state that will be replaced when processing the mutation in CounterMutation, but the reason we use a 'local'
+        // shard is due to the merging rules: if a user includes multiple updates to the same counter in a batch, those
+        // multiple updates will be merged in the PartitionUpdate *before* they even reach CounterMutation. So we need
+        // such update to be added together, and that's what a local shard gives us.
+        //
+        // We set counterid to a special value to differentiate between regular pre-2.0 local shards from pre-2.1 era
+        // and "counter update" temporary state cells. Please see CounterContext.createUpdate() for further details.
+        builder.addCell(BufferCell.live(column, timestamp, CounterContext.instance().createUpdate(increment), path));
     }
 
     public void setComplexDeletionTime(ColumnDefinition column)
@@ -201,12 +210,34 @@ public class UpdateParameters
         return new RangeTombstone(slice, deletionTime);
     }
 
+    /**
+     * Returns the prefetched row with the already performed modifications.
+     * <p>If no modification have yet been performed this method will return the fetched row or {@code null} if
+     * the row does not exist. If some modifications (updates or deletions) have already been done the row returned
+     * will be the result of the merge of the fetched row and of the pending mutations.</p>
+     *
+     * @param key the partition key
+     * @param clustering the row clustering
+     * @return the prefetched row with the already performed modifications
+     */
     public Row getPrefetchedRow(DecoratedKey key, Clustering clustering)
     {
         if (prefetchedRows == null)
             return null;
 
         Partition partition = prefetchedRows.get(key);
-        return partition == null ? null : partition.searchIterator(ColumnFilter.selection(partition.columns()), false).next(clustering);
+        Row prefetchedRow = partition == null ? null : partition.searchIterator(ColumnFilter.selection(partition.columns()), false).next(clustering);
+
+        // We need to apply the pending mutations to return the row in its current state
+        Row pendingMutations = builder.copy().build();
+
+        if (pendingMutations.isEmpty())
+            return prefetchedRow;
+
+        if (prefetchedRow == null)
+            return pendingMutations;
+
+        return Rows.merge(prefetchedRow, pendingMutations, nowInSec)
+                   .purge(DeletionPurger.PURGE_ALL, nowInSec, metadata.enforceStrictLiveness());
     }
 }

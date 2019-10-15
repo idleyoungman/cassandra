@@ -21,7 +21,6 @@ package org.apache.cassandra.stress;
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileInputStream;
-import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
@@ -36,7 +35,7 @@ import java.util.regex.Pattern;
 
 import com.google.common.io.ByteStreams;
 import org.apache.commons.lang3.StringUtils;
-
+import org.apache.cassandra.stress.report.StressMetrics;
 import org.apache.cassandra.stress.settings.StressSettings;
 import org.json.simple.JSONArray;
 import org.json.simple.JSONObject;
@@ -202,7 +201,8 @@ public class StressGraph
                     {
                         continue;
                     }
-                    json.put(parts[0].trim(), parts[1].trim());
+                    // the graphing js expects lower case names
+                    json.put(parts[0].trim().toLowerCase(), parts[1].trim());
                 }
                 else if (mode == ReadingMode.NEXTITERATION)
                 {
@@ -213,7 +213,8 @@ public class StressGraph
                         json.put("revision", stressSettings.graph.revision);
                     else
                         json.put("revision", String.format("%s - %s threads", stressSettings.graph.revision, currentThreadCount));
-                    json.put("command", StringUtils.join(stressArguments, " "));
+                    String command = StringUtils.join(stressArguments, " ").replaceAll("password=.*? ", "password=******* ");
+                    json.put("command", command);
                     json.put("intervals", intervals);
                     stats.add(json);
 
@@ -228,7 +229,7 @@ public class StressGraph
         {
             throw new RuntimeException("Couldn't read from temporary stress log file");
         }
-        stats.add(json);
+        if (json.size() != 0) stats.add(json);
         return stats;
     }
 

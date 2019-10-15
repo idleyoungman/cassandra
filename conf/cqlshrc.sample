@@ -32,14 +32,19 @@
 ;; Used for displaying timestamps (and reading them with COPY)
 ; datetimeformat = %Y-%m-%d %H:%M:%S%z
 
-;; The number of digits displayed after the decimal point
+;; Display timezone
+;timezone = Etc/UTC
+
+;; The number of digits displayed after the decimal point for single and double precision numbers
 ;; (note that increasing this to large numbers can result in unusual values)
-; float_precision = 5
+;float_precision = 5
+;double_precision = 12
 
 ;; Used for automatic completion and suggestions
 ; completekey = tab
 
-
+;; The encoding used for characters
+; encoding = utf8
 
 ; To use another than the system default browser for cqlsh HELP to open
 ; the CQL doc HTML, use the 'browser' preference.
@@ -71,6 +76,9 @@ hostname = 127.0.0.1
 
 ;; The port to connect to (9042 is the native protocol default)
 port = 9042
+
+;; Always connect using SSL - false by default
+; ssl = true
 
 ;; A timeout in seconds for opening new connections
 ; timeout = 10
@@ -198,7 +206,7 @@ port = 9042
 ; maxparseerrors = -1
 
 ;; The maximum global number of insert errors to ignore, -1 means unlimited
-; maxinserterrors = -1
+; maxinserterrors = 1000
 
 ;; A file to store all rows that could not be imported, by default this is
 ;; import_<ks>_<table>.err where <ks> is your keyspace and <table> is your table name.

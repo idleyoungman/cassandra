@@ -24,6 +24,7 @@ import java.util.function.Function;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Joiner;
 import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableSet;
@@ -41,13 +42,14 @@ import org.apache.cassandra.concurrent.JMXEnabledThreadPoolExecutor;
 import org.apache.cassandra.concurrent.NamedThreadFactory;
 import org.apache.cassandra.concurrent.StageManager;
 import org.apache.cassandra.config.ColumnDefinition;
+import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.statements.IndexTarget;
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.compaction.CompactionManager;
 import org.apache.cassandra.db.filter.RowFilter;
 import org.apache.cassandra.db.lifecycle.SSTableSet;
 import org.apache.cassandra.db.lifecycle.View;
-import org.apache.cassandra.db.partitions.PartitionUpdate;
+import org.apache.cassandra.db.partitions.*;
 import org.apache.cassandra.db.rows.*;
 import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.index.internal.CassandraIndex;
@@ -55,7 +57,10 @@ import org.apache.cassandra.index.transactions.*;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
 import org.apache.cassandra.schema.IndexMetadata;
 import org.apache.cassandra.schema.Indexes;
+import org.apache.cassandra.service.pager.SinglePartitionPager;
 import org.apache.cassandra.tracing.Tracing;
+import org.apache.cassandra.transport.ProtocolVersion;
+import org.apache.cassandra.transport.Server;
 import org.apache.cassandra.utils.FBUtilities;
 import org.apache.cassandra.utils.concurrent.OpOrder;
 import org.apache.cassandra.utils.concurrent.Refs;
@@ -65,11 +70,11 @@ import org.apache.cassandra.utils.concurrent.Refs;
  * a table, (re)building during bootstrap or other streaming operations, flushing, reloading metadata
  * and so on.
  *
- * The Index interface defines a number of methods which return Callable<?>. These are primarily the
+ * The Index interface defines a number of methods which return {@code Callable<?>}. These are primarily the
  * management tasks for an index implementation. Most of them are currently executed in a blocking
  * fashion via submission to SIM's blockingExecutor. This provides the desired behaviour in pretty
  * much all cases, as tasks like flushing an index needs to be executed synchronously to avoid potentially
- * deadlocking on the FlushWriter or PostFlusher. Several of these Callable<?> returning methods on Index could
+ * deadlocking on the FlushWriter or PostFlusher. Several of these {@code Callable<?>} returning methods on Index could
  * then be defined with as void and called directly from SIM (rather than being run via the executor service).
  * Separating the task defintion from execution gives us greater flexibility though, so that in future, for example,
  * if the flush process allows it we leave open the possibility of executing more of these tasks asynchronously.
@@ -96,6 +101,9 @@ import org.apache.cassandra.utils.concurrent.Refs;
 public class SecondaryIndexManager implements IndexRegistry
 {
     private static final Logger logger = LoggerFactory.getLogger(SecondaryIndexManager.class);
+
+    // default page size (in rows) when rebuilding the index for a whole partition
+    public static final int DEFAULT_PAGE_SIZE = 10000;
 
     private Map<String, Index> indexes = Maps.newConcurrentMap();
 
@@ -270,7 +278,7 @@ public class SecondaryIndexManager implements IndexRegistry
     {
         if (index.shouldBuildBlocking())
         {
-            try (ColumnFamilyStore.RefViewFragment viewFragment = baseCfs.selectAndReference(View.select(SSTableSet.CANONICAL));
+            try (ColumnFamilyStore.RefViewFragment viewFragment = baseCfs.selectAndReference(View.selectFunction(SSTableSet.CANONICAL));
                  Refs<SSTableReader> sstables = viewFragment.refs)
             {
                 buildIndexesBlocking(sstables, Collections.singleton(index));
@@ -387,7 +395,8 @@ public class SecondaryIndexManager implements IndexRegistry
     public void markIndexBuilt(String indexName)
     {
         builtIndexes.add(indexName);
-        SystemKeyspace.setIndexBuilt(baseCfs.keyspace.getName(), indexName);
+        if (DatabaseDescriptor.isDaemonInitialized())
+            SystemKeyspace.setIndexBuilt(baseCfs.keyspace.getName(), indexName);
     }
 
     /**
@@ -417,7 +426,7 @@ public class SecondaryIndexManager implements IndexRegistry
             {
                 Class<? extends Index> indexClass = FBUtilities.classForName(className, "Index");
                 Constructor<? extends Index> ctor = indexClass.getConstructor(ColumnFamilyStore.class, IndexMetadata.class);
-                newIndex = (Index)ctor.newInstance(baseCfs, indexDef);
+                newIndex = ctor.newInstance(baseCfs, indexDef);
             }
             catch (Exception e)
             {
@@ -486,10 +495,21 @@ public class SecondaryIndexManager implements IndexRegistry
      */
     public void flushAllNonCFSBackedIndexesBlocking()
     {
-        Set<Index> customIndexers = indexes.values().stream()
-                                                    .filter(index -> !(index.getBackingTable().isPresent()))
-                                                    .collect(Collectors.toSet());
-        flushIndexesBlocking(customIndexers);
+        executeAllBlocking(indexes.values()
+                                  .stream()
+                                  .filter(index -> !index.getBackingTable().isPresent()),
+                           Index::getBlockingFlushTask);
+    }
+
+    /**
+     * Performs a blocking execution of pre-join tasks of all indexes
+     */
+    public void executePreJoinTasksBlocking(boolean hadBootstrap)
+    {
+        logger.info("Executing pre-join{} tasks for: {}", hadBootstrap ? " post-bootstrap" : "", this.baseCfs);
+        executeAllBlocking(indexes.values().stream(), (index) -> {
+            return index.getPreJoinTask(hadBootstrap);
+        });
     }
 
     /**
@@ -525,43 +545,133 @@ public class SecondaryIndexManager implements IndexRegistry
     /**
      * When building an index against existing data in sstables, add the given partition to the index
      */
-    public void indexPartition(UnfilteredRowIterator partition, OpOrder.Group opGroup, Set<Index> indexes, int nowInSec)
+    public void indexPartition(DecoratedKey key, Set<Index> indexes, int pageSize)
     {
+        if (logger.isTraceEnabled())
+            logger.trace("Indexing partition {}", baseCfs.metadata.getKeyValidator().getString(key.getKey()));
+
         if (!indexes.isEmpty())
         {
-            DecoratedKey key = partition.partitionKey();
-            Set<Index.Indexer> indexers = indexes.stream()
-                                                 .map(index -> index.indexerFor(key,
-                                                                                partition.columns(),
-                                                                                nowInSec,
-                                                                                opGroup,
-                                                                                IndexTransaction.Type.UPDATE))
-                                                 .filter(Objects::nonNull)
-                                                 .collect(Collectors.toSet());
+            SinglePartitionReadCommand cmd = SinglePartitionReadCommand.fullPartitionRead(baseCfs.metadata,
+                                                                                          FBUtilities.nowInSeconds(),
+                                                                                          key);
+            int nowInSec = cmd.nowInSec();
+            boolean readStatic = false;
 
-            indexers.forEach(Index.Indexer::begin);
-
-            try (RowIterator filtered = UnfilteredRowIterators.filter(partition, nowInSec))
+            SinglePartitionPager pager = new SinglePartitionPager(cmd, null, ProtocolVersion.CURRENT);
+            while (!pager.isExhausted())
             {
-                if (!filtered.staticRow().isEmpty())
-                    indexers.forEach(indexer -> indexer.insertRow(filtered.staticRow()));
-
-                while (filtered.hasNext())
+                try (ReadExecutionController controller = cmd.executionController();
+                     OpOrder.Group writeGroup = Keyspace.writeOrder.start();
+                     UnfilteredPartitionIterator page = pager.fetchPageUnfiltered(baseCfs.metadata, pageSize, controller))
                 {
-                    Row row = filtered.next();
-                    indexers.forEach(indexer -> indexer.insertRow(row));
+                    if (!page.hasNext())
+                        break;
+
+                    try (UnfilteredRowIterator partition = page.next()) {
+                        Set<Index.Indexer> indexers = indexes.stream()
+                                                             .map(index -> index.indexerFor(key,
+                                                                                            partition.columns(),
+                                                                                            nowInSec,
+                                                                                            writeGroup,
+                                                                                            IndexTransaction.Type.UPDATE))
+                                                             .filter(Objects::nonNull)
+                                                             .collect(Collectors.toSet());
+
+                        // Short-circuit empty partitions if static row is processed or isn't read
+                        if (!readStatic && partition.isEmpty() && partition.staticRow().isEmpty())
+                            break;
+
+                        indexers.forEach(Index.Indexer::begin);
+
+                        if (!readStatic)
+                        {
+                            if (!partition.staticRow().isEmpty())
+                                indexers.forEach(indexer -> indexer.insertRow(partition.staticRow()));
+                            indexers.forEach((Index.Indexer i) -> i.partitionDelete(partition.partitionLevelDeletion()));
+                            readStatic = true;
+                        }
+
+                        MutableDeletionInfo.Builder deletionBuilder = MutableDeletionInfo.builder(partition.partitionLevelDeletion(), baseCfs.getComparator(), false);
+
+                        while (partition.hasNext())
+                        {
+                            Unfiltered unfilteredRow = partition.next();
+
+                            if (unfilteredRow.isRow())
+                            {
+                                Row row = (Row) unfilteredRow;
+                                indexers.forEach(indexer -> indexer.insertRow(row));
+                            }
+                            else
+                            {
+                                assert unfilteredRow.isRangeTombstoneMarker();
+                                RangeTombstoneMarker marker = (RangeTombstoneMarker) unfilteredRow;
+                                deletionBuilder.add(marker);
+                            }
+                        }
+
+                        MutableDeletionInfo deletionInfo = deletionBuilder.build();
+                        if (deletionInfo.hasRanges())
+                        {
+                            Iterator<RangeTombstone> iter = deletionInfo.rangeIterator(false);
+                            while (iter.hasNext())
+                            {
+                                RangeTombstone rt = iter.next();
+                                indexers.forEach(indexer -> indexer.rangeTombstone(rt));
+                            }
+                        }
+
+                        indexers.forEach(Index.Indexer::finish);
+                    }
                 }
             }
-
-            indexers.forEach(Index.Indexer::finish);
         }
+    }
+
+    /**
+     * Return the page size used when indexing an entire partition
+     */
+    public int calculateIndexingPageSize()
+    {
+        if (Boolean.getBoolean("cassandra.force_default_indexing_page_size"))
+            return DEFAULT_PAGE_SIZE;
+
+        double targetPageSizeInBytes = 32 * 1024 * 1024;
+        double meanPartitionSize = baseCfs.getMeanPartitionSize();
+        if (meanPartitionSize <= 0)
+            return DEFAULT_PAGE_SIZE;
+
+        int meanCellsPerPartition = baseCfs.getMeanColumns();
+        if (meanCellsPerPartition <= 0)
+            return DEFAULT_PAGE_SIZE;
+
+        int columnsPerRow = baseCfs.metadata.partitionColumns().regulars.size();
+        if (columnsPerRow <= 0)
+            return DEFAULT_PAGE_SIZE;
+
+        int meanRowsPerPartition = meanCellsPerPartition / columnsPerRow;
+        double meanRowSize = meanPartitionSize / meanRowsPerPartition;
+
+        int pageSize = (int) Math.max(1, Math.min(DEFAULT_PAGE_SIZE, targetPageSizeInBytes / meanRowSize));
+
+        logger.trace("Calculated page size {} for indexing {}.{} ({}/{}/{}/{})",
+                     pageSize,
+                     baseCfs.metadata.ksName,
+                     baseCfs.metadata.cfName,
+                     meanPartitionSize,
+                     meanCellsPerPartition,
+                     meanRowsPerPartition,
+                     meanRowSize);
+
+        return pageSize;
     }
 
     /**
      * Delete all data from all indexes for this partition.
      * For when cleanup rips a partition out entirely.
      *
-     * TODO : improve cleanup transaction to batch updates & perform them async
+     * TODO : improve cleanup transaction to batch updates and perform them async
      */
     public void deletePartition(UnfilteredRowIterator partition, int nowInSec)
     {
@@ -611,17 +721,17 @@ public class SecondaryIndexManager implements IndexRegistry
      * cached for future use when obtaining a Searcher, getting the index's underlying CFS for
      * ReadOrderGroup, or an estimate of the result size from an average index query.
      *
-     * @param command ReadCommand to be executed
+     * @param rowFilter RowFilter of the command to be executed
      * @return an Index instance, ready to use during execution of the command, or null if none
      * of the registered indexes can support the command.
      */
-    public Index getBestIndexFor(ReadCommand command)
+    public Index getBestIndexFor(RowFilter rowFilter)
     {
-        if (indexes.isEmpty() || command.rowFilter().isEmpty())
+        if (indexes.isEmpty() || rowFilter.isEmpty())
             return null;
 
         Set<Index> searchableIndexes = new HashSet<>();
-        for (RowFilter.Expression expression : command.rowFilter())
+        for (RowFilter.Expression expression : rowFilter)
         {
             if (expression.isCustom())
             {
@@ -632,7 +742,7 @@ public class SecondaryIndexManager implements IndexRegistry
                 Tracing.trace("Command contains a custom index expression, using target index {}", customExpression.getTargetIndex().name);
                 return indexes.get(customExpression.getTargetIndex().name);
             }
-            else
+            else if (!expression.isUserDefined())
             {
                 indexes.values().stream()
                        .filter(index -> index.supportsExpression(expression.column(), expression.operator()))
@@ -915,6 +1025,8 @@ public class SecondaryIndexManager implements IndexRegistry
             {
                 public void onPrimaryKeyLivenessInfo(int i, Clustering clustering, LivenessInfo merged, LivenessInfo original)
                 {
+                    if (original != null && (merged == null || !merged.isLive(nowInSec)))
+                        getBuilder(i, clustering).addPrimaryKeyLivenessInfo(original);
                 }
 
                 public void onDeletion(int i, Clustering clustering, Row.Deletion merged, Row.Deletion original)
@@ -927,15 +1039,18 @@ public class SecondaryIndexManager implements IndexRegistry
 
                 public void onCell(int i, Clustering clustering, Cell merged, Cell original)
                 {
-                    if (original != null && merged == null)
+                    if (original != null && (merged == null || !merged.isLive(nowInSec)))
+                        getBuilder(i, clustering).addCell(original);
+                }
+
+                private Row.Builder getBuilder(int index, Clustering clustering)
+                {
+                    if (builders[index] == null)
                     {
-                        if (builders[i] == null)
-                        {
-                            builders[i] = BTreeRow.sortedBuilder();
-                            builders[i].newRow(clustering);
-                        }
-                        builders[i].addCell(original);
+                        builders[index] = BTreeRow.sortedBuilder();
+                        builders[index].newRow(clustering);
                     }
+                    return builders[index];
                 }
             };
 
@@ -1058,5 +1173,15 @@ public class SecondaryIndexManager implements IndexRegistry
                 waitFor.add(blockingExecutor.submit(task));
         });
         FBUtilities.waitOnFutures(waitFor);
+    }
+
+    @VisibleForTesting
+    public static void shutdownExecutors() throws InterruptedException
+    {
+        ExecutorService[] executors = new ExecutorService[]{ asyncExecutor, blockingExecutor };
+        for (ExecutorService executor : executors)
+            executor.shutdown();
+        for (ExecutorService executor : executors)
+            executor.awaitTermination(60, TimeUnit.SECONDS);
     }
 }

@@ -19,13 +19,19 @@ package org.apache.cassandra.db.rows;
 import java.nio.ByteBuffer;
 import java.security.MessageDigest;
 import java.util.AbstractCollection;
+import java.util.Collections;
 import java.util.Objects;
+import java.util.Set;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+import java.util.stream.StreamSupport;
 
 import com.google.common.collect.Iterables;
 
 import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.marshal.CollectionType;
+import org.apache.cassandra.db.marshal.UserType;
 import org.apache.cassandra.serializers.MarshalException;
 import org.apache.cassandra.utils.FBUtilities;
 
@@ -35,18 +41,20 @@ import org.apache.cassandra.utils.FBUtilities;
  * Unless you have a very good reason not to, every row implementation
  * should probably extend this class.
  */
-public abstract class AbstractRow extends AbstractCollection<ColumnData> implements Row
+public abstract class AbstractRow implements Row
 {
     public Unfiltered.Kind kind()
     {
         return Unfiltered.Kind.ROW;
     }
 
-    public boolean hasLiveData(int nowInSec)
+    @Override
+    public boolean hasLiveData(int nowInSec, boolean enforceStrictLiveness)
     {
         if (primaryKeyLivenessInfo().isLive(nowInSec))
             return true;
-
+        else if (enforceStrictLiveness)
+            return false;
         return Iterables.any(cells(), cell -> cell.isLive(nowInSec));
     }
 
@@ -57,6 +65,11 @@ public abstract class AbstractRow extends AbstractCollection<ColumnData> impleme
 
     public void digest(MessageDigest digest)
     {
+        digest(digest, Collections.emptySet());
+    }
+
+    public void digest(MessageDigest digest, Set<ByteBuffer> columnsToExclude)
+    {
         FBUtilities.updateWithByte(digest, kind().ordinal());
         clustering().digest(digest);
 
@@ -64,7 +77,8 @@ public abstract class AbstractRow extends AbstractCollection<ColumnData> impleme
         primaryKeyLivenessInfo().digest(digest);
 
         for (ColumnData cd : this)
-            cd.digest(digest);
+            if (!columnsToExclude.contains(cd.column.name.bytes))
+                cd.digest(digest);
     }
 
     public void validateData(CFMetaData metadata)
@@ -85,12 +99,22 @@ public abstract class AbstractRow extends AbstractCollection<ColumnData> impleme
             cd.validate();
     }
 
+    public String toString()
+    {
+        return columnData().toString();
+    }
+
     public String toString(CFMetaData metadata)
     {
         return toString(metadata, false);
     }
 
     public String toString(CFMetaData metadata, boolean fullDetails)
+    {
+        return toString(metadata, true, fullDetails);
+    }
+
+    public String toString(CFMetaData metadata, boolean includeClusterKeys, boolean fullDetails)
     {
         StringBuilder sb = new StringBuilder();
         sb.append("Row");
@@ -101,7 +125,12 @@ public abstract class AbstractRow extends AbstractCollection<ColumnData> impleme
                 sb.append(" del=").append(deletion());
             sb.append(" ]");
         }
-        sb.append(": ").append(clustering().toString(metadata)).append(" | ");
+        sb.append(": ");
+        if(includeClusterKeys)
+            sb.append(clustering().toString(metadata));
+        else
+            sb.append(clustering().toCQLString(metadata));
+        sb.append(" | ");
         boolean isFirst = true;
         for (ColumnData cd : this)
         {
@@ -134,16 +163,30 @@ public abstract class AbstractRow extends AbstractCollection<ColumnData> impleme
                 }
                 else
                 {
-                    ComplexColumnData complexData = (ComplexColumnData)cd;
-                    CollectionType ct = (CollectionType)cd.column().type;
-                    sb.append(cd.column().name).append("={");
-                    int i = 0;
-                    for (Cell cell : complexData)
+                    sb.append(cd.column().name).append('=');
+                    ComplexColumnData complexData = (ComplexColumnData) cd;
+                    Function<Cell, String> transform = null;
+                    if (cd.column().type.isCollection())
                     {
-                        sb.append(i++ == 0 ? "" : ", ");
-                        sb.append(ct.nameComparator().getString(cell.path().get(0))).append("->").append(ct.valueComparator().getString(cell.value()));
+                        CollectionType ct = (CollectionType) cd.column().type;
+                        transform = cell -> String.format("%s -> %s",
+                                                  ct.nameComparator().getString(cell.path().get(0)),
+                                                  ct.valueComparator().getString(cell.value()));
+
                     }
-                    sb.append('}');
+                    else if (cd.column().type.isUDT())
+                    {
+                        UserType ut = (UserType)cd.column().type;
+                        transform = cell -> {
+                            Short fId = ut.nameComparator().getSerializer().deserialize(cell.path().get(0));
+                            return String.format("%s -> %s",
+                                                 ut.fieldNameAsString(fId),
+                                                 ut.fieldType(fId).getString(cell.value()));
+                        };
+                    }
+                    sb.append(StreamSupport.stream(complexData.spliterator(), false)
+                                           .map(transform != null ? transform : cell -> "")
+                                           .collect(Collectors.joining(", ", "{", "}")));
                 }
             }
         }
@@ -168,7 +211,7 @@ public abstract class AbstractRow extends AbstractCollection<ColumnData> impleme
     @Override
     public int hashCode()
     {
-        int hash = Objects.hash(clustering(), columns(), primaryKeyLivenessInfo(), deletion());
+        int hash = Objects.hash(clustering(), primaryKeyLivenessInfo(), deletion());
         for (ColumnData cd : this)
             hash += 31 * cd.hashCode();
         return hash;

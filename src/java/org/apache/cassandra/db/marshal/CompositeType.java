@@ -120,17 +120,6 @@ public class CompositeType extends AbstractCompositeType
         this.types = ImmutableList.copyOf(types);
     }
 
-    @Override
-    public boolean references(AbstractType<?> check)
-    {
-        if (super.references(check))
-            return true;
-        for (AbstractType<?> type : types)
-            if (type.references(check))
-                return true;
-        return false;
-    }
-
     protected AbstractType<?> getComparator(int i, ByteBuffer bb)
     {
         try
@@ -236,32 +225,6 @@ public class CompositeType extends AbstractCompositeType
             ++i;
         }
         return null;
-    }
-
-    public static class CompositeComponent
-    {
-        public ByteBuffer value;
-        public byte eoc;
-
-        public CompositeComponent(ByteBuffer value, byte eoc)
-        {
-            this.value = value;
-            this.eoc = eoc;
-        }
-    }
-
-    public static List<CompositeComponent> deconstruct(ByteBuffer bytes)
-    {
-        List<CompositeComponent> list = new ArrayList<>();
-        ByteBuffer bb = bytes.duplicate();
-        readStatic(bb);
-        while (bb.remaining() > 0)
-        {
-            ByteBuffer value = ByteBufferUtil.readBytesWithShortLength(bb);
-            byte eoc = bb.get();
-            list.add(new CompositeComponent(value, eoc));
-        }
-        return list;
     }
 
     // Extract CQL3 column name from the full column name.
@@ -376,6 +339,11 @@ public class CompositeType extends AbstractCompositeType
         return new Builder(this);
     }
 
+    public Builder builder(boolean isStatic)
+    {
+        return new Builder(this, isStatic);
+    }
+
     public static ByteBuffer build(ByteBuffer... buffers)
     {
         return build(false, buffers);
@@ -415,12 +383,12 @@ public class CompositeType extends AbstractCompositeType
 
         public Builder(CompositeType composite)
         {
-            this(composite, new ArrayList<ByteBuffer>(composite.types.size()), new byte[composite.types.size()], false);
+            this(composite, false);
         }
 
-        public static Builder staticBuilder(CompositeType composite)
+        public Builder(CompositeType composite, boolean isStatic)
         {
-            return new Builder(composite, new ArrayList<ByteBuffer>(composite.types.size()), new byte[composite.types.size()], true);
+            this(composite, new ArrayList<>(composite.types.size()), new byte[composite.types.size()], isStatic);
         }
 
         private Builder(CompositeType composite, List<ByteBuffer> components, byte[] endOfComponents, boolean isStatic)
@@ -437,7 +405,7 @@ public class CompositeType extends AbstractCompositeType
 
         private Builder(Builder b)
         {
-            this(b.composite, new ArrayList<ByteBuffer>(b.components), Arrays.copyOf(b.endOfComponents, b.endOfComponents.length), b.isStatic);
+            this(b.composite, new ArrayList<>(b.components), Arrays.copyOf(b.endOfComponents, b.endOfComponents.length), b.isStatic);
             this.serializedSize = b.serializedSize;
         }
 

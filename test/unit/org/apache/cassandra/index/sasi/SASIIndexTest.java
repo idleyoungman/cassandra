@@ -17,17 +17,27 @@
  */
 package org.apache.cassandra.index.sasi;
 
+import java.io.FileWriter;
+import java.io.IOException;
+import java.io.Writer;
 import java.nio.ByteBuffer;
+import java.nio.file.FileSystems;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.util.*;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Collectors;
 
 import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.config.ColumnDefinition;
+import org.apache.cassandra.config.Schema;
+import org.apache.cassandra.index.Index;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.*;
 import org.apache.cassandra.cql3.Term;
@@ -37,6 +47,7 @@ import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.filter.ColumnFilter;
 import org.apache.cassandra.db.filter.DataLimits;
 import org.apache.cassandra.db.filter.RowFilter;
+import org.apache.cassandra.db.lifecycle.SSTableSet;
 import org.apache.cassandra.db.marshal.*;
 import org.apache.cassandra.db.partitions.PartitionUpdate;
 import org.apache.cassandra.db.partitions.UnfilteredPartitionIterator;
@@ -46,17 +57,26 @@ import org.apache.cassandra.dht.Murmur3Partitioner;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.exceptions.ConfigurationException;
 import org.apache.cassandra.exceptions.InvalidRequestException;
-import org.apache.cassandra.exceptions.SyntaxException;
+import org.apache.cassandra.index.sasi.analyzer.AbstractAnalyzer;
+import org.apache.cassandra.index.sasi.analyzer.DelimiterAnalyzer;
+import org.apache.cassandra.index.sasi.analyzer.NoOpAnalyzer;
+import org.apache.cassandra.index.sasi.analyzer.NonTokenizingAnalyzer;
+import org.apache.cassandra.index.sasi.analyzer.StandardAnalyzer;
 import org.apache.cassandra.index.sasi.conf.ColumnIndex;
 import org.apache.cassandra.index.sasi.disk.OnDiskIndexBuilder;
 import org.apache.cassandra.index.sasi.exceptions.TimeQuotaExceededException;
+import org.apache.cassandra.index.sasi.memory.IndexMemtable;
+import org.apache.cassandra.index.sasi.plan.QueryController;
 import org.apache.cassandra.index.sasi.plan.QueryPlan;
+import org.apache.cassandra.io.sstable.IndexSummaryManager;
+import org.apache.cassandra.io.sstable.SSTable;
 import org.apache.cassandra.schema.IndexMetadata;
 import org.apache.cassandra.schema.KeyspaceMetadata;
 import org.apache.cassandra.schema.KeyspaceParams;
 import org.apache.cassandra.schema.Tables;
 import org.apache.cassandra.serializers.MarshalException;
 import org.apache.cassandra.serializers.TypeSerializer;
+import org.apache.cassandra.service.ClientState;
 import org.apache.cassandra.service.MigrationManager;
 import org.apache.cassandra.service.QueryState;
 import org.apache.cassandra.thrift.CqlRow;
@@ -74,24 +94,34 @@ import org.junit.*;
 
 public class SASIIndexTest
 {
-    private static final IPartitioner PARTITIONER = new Murmur3Partitioner();
+    private static final IPartitioner PARTITIONER;
+
+    static {
+        System.setProperty("cassandra.config", "cassandra-murmur.yaml");
+        PARTITIONER = Murmur3Partitioner.instance;
+    }
 
     private static final String KS_NAME = "sasi";
     private static final String CF_NAME = "test_cf";
-    private static final String CLUSTERING_CF_NAME = "clustering_test_cf";
+    private static final String CLUSTERING_CF_NAME_1 = "clustering_test_cf_1";
+    private static final String CLUSTERING_CF_NAME_2 = "clustering_test_cf_2";
+    private static final String STATIC_CF_NAME = "static_sasi_test_cf";
+    private static final String FTS_CF_NAME = "full_text_search_sasi_test_cf";
 
     @BeforeClass
     public static void loadSchema() throws ConfigurationException
     {
-        System.setProperty("cassandra.config", "cassandra-murmur.yaml");
         SchemaLoader.loadSchema();
         MigrationManager.announceNewKeyspace(KeyspaceMetadata.create(KS_NAME,
                                                                      KeyspaceParams.simpleTransient(1),
                                                                      Tables.of(SchemaLoader.sasiCFMD(KS_NAME, CF_NAME),
-                                                                               SchemaLoader.clusteringSASICFMD(KS_NAME, CLUSTERING_CF_NAME))));
+                                                                               SchemaLoader.clusteringSASICFMD(KS_NAME, CLUSTERING_CF_NAME_1),
+                                                                               SchemaLoader.clusteringSASICFMD(KS_NAME, CLUSTERING_CF_NAME_2, "location"),
+                                                                               SchemaLoader.staticSASICFMD(KS_NAME, STATIC_CF_NAME),
+                                                                               SchemaLoader.fullTextSearchSASICFMD(KS_NAME, FTS_CF_NAME))));
     }
 
-    @After
+    @Before
     public void cleanUp()
     {
         Keyspace.open(KS_NAME).getColumnFamilyStore(CF_NAME).truncateBlocking();
@@ -167,7 +197,7 @@ public class SASIIndexTest
 
         ColumnFamilyStore store = loadData(data, forceFlush);
 
-        Set<String> rows= getIndexed(store, 10, buildExpression(UTF8Type.instance.decompose("first_name"), Operator.EQ, UTF8Type.instance.decompose("doesntmatter")));
+        Set<String> rows= getIndexed(store, 10, buildExpression(UTF8Type.instance.decompose("first_name"), Operator.LIKE_MATCHES, UTF8Type.instance.decompose("doesntmatter")));
         Assert.assertTrue(rows.toString(), Arrays.equals(new String[]{}, rows.toArray(new String[rows.size()])));
     }
 
@@ -407,6 +437,32 @@ public class SASIIndexTest
     }
 
     @Test
+    public void testPrefixSearchWithContainsMode() throws Exception
+    {
+        testPrefixSearchWithContainsMode(false);
+        cleanupData();
+        testPrefixSearchWithContainsMode(true);
+    }
+
+    private void testPrefixSearchWithContainsMode(boolean forceFlush) throws Exception
+    {
+        ColumnFamilyStore store = Keyspace.open(KS_NAME).getColumnFamilyStore(FTS_CF_NAME);
+
+        executeCQL(FTS_CF_NAME, "INSERT INTO %s.%s (song_id, title, artist) VALUES(?, ?, ?)", UUID.fromString("1a4abbcd-b5de-4c69-a578-31231e01ff09"), "Poker Face", "Lady Gaga");
+        executeCQL(FTS_CF_NAME, "INSERT INTO %s.%s (song_id, title, artist) VALUES(?, ?, ?)", UUID.fromString("9472a394-359b-4a06-b1d5-b6afce590598"), "Forgetting the Way Home", "Our Lady of Bells");
+        executeCQL(FTS_CF_NAME, "INSERT INTO %s.%s (song_id, title, artist) VALUES(?, ?, ?)", UUID.fromString("4f8dc18e-54e6-4e16-b507-c5324b61523b"), "Zamki na piasku", "Lady Pank");
+        executeCQL(FTS_CF_NAME, "INSERT INTO %s.%s (song_id, title, artist) VALUES(?, ?, ?)", UUID.fromString("eaf294fa-bad5-49d4-8f08-35ba3636a706"), "Koncertowa", "Lady Pank");
+
+
+        if (forceFlush)
+            store.forceBlockingFlush();
+
+        final UntypedResultSet results = executeCQL(FTS_CF_NAME, "SELECT * FROM %s.%s WHERE artist LIKE 'lady%%'");
+        Assert.assertNotNull(results);
+        Assert.assertEquals(3, results.size());
+    }
+
+    @Test
     public void testMultiExpressionQueriesWhereRowSplitBetweenSSTables() throws Exception
     {
         testMultiExpressionQueriesWhereRowSplitBetweenSSTables(false);
@@ -502,18 +558,18 @@ public class SASIIndexTest
         store = loadData(part4, forceFlush);
 
         rows = getIndexed(store, 10,
-                          buildExpression(firstName, Operator.EQ, UTF8Type.instance.decompose("Susana")),
+                          buildExpression(firstName, Operator.LIKE_MATCHES, UTF8Type.instance.decompose("Susana")),
                           buildExpression(age, Operator.LTE, Int32Type.instance.decompose(13)),
                           buildExpression(age, Operator.GT, Int32Type.instance.decompose(10)));
         Assert.assertTrue(rows.toString(), Arrays.equals(new String[] { "key12" }, rows.toArray(new String[rows.size()])));
 
         rows = getIndexed(store, 10,
-                          buildExpression(firstName, Operator.EQ, UTF8Type.instance.decompose("Demario")),
+                          buildExpression(firstName, Operator.LIKE_MATCHES, UTF8Type.instance.decompose("Demario")),
                           buildExpression(age, Operator.LTE, Int32Type.instance.decompose(30)));
         Assert.assertTrue(rows.toString(), rows.size() == 0);
 
         rows = getIndexed(store, 10,
-                          buildExpression(firstName, Operator.EQ, UTF8Type.instance.decompose("Josephine")));
+                          buildExpression(firstName, Operator.LIKE_MATCHES, UTF8Type.instance.decompose("Josephine")));
         Assert.assertTrue(rows.toString(), rows.size() == 0);
 
         rows = getIndexed(store, 10,
@@ -851,6 +907,77 @@ public class SASIIndexTest
     }
 
     @Test
+    public void testIndexRedistribution() throws IOException
+    {
+        Map<String, Pair<String, Integer>> part1 = new HashMap<String, Pair<String, Integer>>()
+        {{
+            put("key01", Pair.create("a", 33));
+            put("key02", Pair.create("a", 41));
+        }};
+
+        Map<String, Pair<String, Integer>> part2 = new HashMap<String, Pair<String, Integer>>()
+        {{
+            put("key03", Pair.create("a", 22));
+            put("key04", Pair.create("a", 45));
+        }};
+
+        Map<String, Pair<String, Integer>> part3 = new HashMap<String, Pair<String, Integer>>()
+        {{
+            put("key05", Pair.create("a", 32));
+            put("key06", Pair.create("a", 38));
+        }};
+
+        Map<String, Pair<String, Integer>> part4 = new HashMap<String, Pair<String, Integer>>()
+        {{
+            put("key07", Pair.create("a", 36));
+            put("key08", Pair.create("a", 36));
+        }};
+
+        Map<String, Pair<String, Integer>> part5 = new HashMap<String, Pair<String, Integer>>()
+        {{
+            put("key09", Pair.create("a", 21));
+            put("key10", Pair.create("a", 35));
+        }};
+
+        ColumnFamilyStore store = loadData(part1, 1000, true);
+        loadData(part2, true);
+        loadData(part3, true);
+
+        final ByteBuffer firstName = UTF8Type.instance.decompose("first_name");
+
+        Set<String> rows = getIndexed(store, 100, buildExpression(firstName, Operator.LIKE_CONTAINS, UTF8Type.instance.decompose("a")));
+        Assert.assertEquals(rows.toString(), 6, rows.size());
+
+        loadData(part4, true);
+        rows = getIndexed(store, 100, buildExpression(firstName, Operator.LIKE_CONTAINS, UTF8Type.instance.decompose("a")));
+        Assert.assertEquals(rows.toString(), 8, rows.size());
+
+        loadData(part5, true);
+
+        int minIndexInterval = store.metadata.params.minIndexInterval;
+        try
+        {
+            redistributeSummaries(10, store, firstName, minIndexInterval * 2);
+            redistributeSummaries(10, store, firstName, minIndexInterval * 4);
+            redistributeSummaries(10, store, firstName, minIndexInterval * 8);
+            redistributeSummaries(10, store, firstName, minIndexInterval * 16);
+        } finally
+        {
+            store.metadata.minIndexInterval(minIndexInterval);
+        }
+    }
+
+    private void redistributeSummaries(int expected, ColumnFamilyStore store, ByteBuffer firstName, int minIndexInterval) throws IOException
+    {
+        store.metadata.minIndexInterval(minIndexInterval);
+        IndexSummaryManager.instance.redistributeSummaries();
+        store.forceBlockingFlush();
+
+        Set<String> rows = getIndexed(store, 100, buildExpression(firstName, Operator.LIKE_CONTAINS, UTF8Type.instance.decompose("a")));
+        Assert.assertEquals(rows.toString(), expected, rows.size());
+    }
+
+    @Test
     public void testTruncate()
     {
         Map<String, Pair<String, Integer>> part1 = new HashMap<String, Pair<String, Integer>>()
@@ -1055,8 +1182,8 @@ public class SASIIndexTest
         Mutation rm = new Mutation(KS_NAME, decoratedKey(AsciiType.instance.decompose("key1")));
         update(rm, new ArrayList<Cell>()
         {{
-            add(buildCell(firstName, AsciiType.instance.decompose("pavel"), System.currentTimeMillis()));
             add(buildCell(age, LongType.instance.decompose(26L), System.currentTimeMillis()));
+            add(buildCell(firstName, AsciiType.instance.decompose("pavel"), System.currentTimeMillis()));
         }});
         rm.apply();
 
@@ -1142,7 +1269,7 @@ public class SASIIndexTest
         rows = getIndexed(store, 10, buildExpression(comment, Operator.LIKE_SUFFIX, UTF8Type.instance.decompose("ン")));
         Assert.assertTrue(rows.toString(), Arrays.equals(new String[] { "key4", "key5" }, rows.toArray(new String[rows.size()])));
 
-        rows = getIndexed(store, 10, buildExpression(comment, Operator.EQ, UTF8Type.instance.decompose("レストラン")));
+        rows = getIndexed(store, 10, buildExpression(comment, Operator.LIKE_MATCHES, UTF8Type.instance.decompose("レストラン")));
         Assert.assertTrue(rows.toString(), Arrays.equals(new String[] { "key4" }, rows.toArray(new String[rows.size()])));
     }
 
@@ -1211,7 +1338,7 @@ public class SASIIndexTest
         rows = getIndexed(store, 10, buildExpression(comment, Operator.LIKE_SUFFIX, UTF8Type.instance.decompose("ン")));
         Assert.assertTrue(rows.toString(), Arrays.equals(new String[] { "key3" }, rows.toArray(new String[rows.size()])));
 
-        rows = getIndexed(store, 10, buildExpression(comment, Operator.EQ, UTF8Type.instance.decompose("ベンジャミン ウエスト")));
+        rows = getIndexed(store, 10, buildExpression(comment, Operator.LIKE_MATCHES, UTF8Type.instance.decompose("ベンジャミン ウエスト")));
         Assert.assertTrue(rows.toString(), Arrays.equals(new String[] { "key4" }, rows.toArray(new String[rows.size()])));
     }
 
@@ -1235,12 +1362,12 @@ public class SASIIndexTest
 
             Set<String> rows;
 
-            rows = getIndexed(store, 10, buildExpression(comment, Operator.EQ, bigValue.duplicate()));
+            rows = getIndexed(store, 10, buildExpression(comment, Operator.LIKE_MATCHES, bigValue.duplicate()));
             Assert.assertEquals(0, rows.size());
 
             store.forceBlockingFlush();
 
-            rows = getIndexed(store, 10, buildExpression(comment, Operator.EQ, bigValue.duplicate()));
+            rows = getIndexed(store, 10, buildExpression(comment, Operator.LIKE_MATCHES, bigValue.duplicate()));
             Assert.assertEquals(0, rows.size());
         }
     }
@@ -1263,14 +1390,14 @@ public class SASIIndexTest
         RowFilter filter = RowFilter.create();
         filter.add(store.metadata.getColumnDefinition(firstName), Operator.LIKE_CONTAINS, AsciiType.instance.fromString("a"));
 
-        ReadCommand command = new PartitionRangeReadCommand(store.metadata,
-                                                            FBUtilities.nowInSeconds(),
-                                                            ColumnFilter.all(store.metadata),
-                                                            filter,
-                                                            DataLimits.NONE,
-                                                            DataRange.allData(store.metadata.partitioner),
-                                                            Optional.empty());
-
+        ReadCommand command =
+            PartitionRangeReadCommand.create(false,
+                                             store.metadata,
+                                             FBUtilities.nowInSeconds(),
+                                             ColumnFilter.all(store.metadata),
+                                             filter,
+                                             DataLimits.NONE,
+                                             DataRange.allData(store.metadata.partitioner));
         try
         {
             new QueryPlan(store, command, 0).execute(ReadExecutionController.empty());
@@ -1288,8 +1415,11 @@ public class SASIIndexTest
 
         // to make sure that query doesn't fail in normal conditions
 
-        Set<String> rows = getKeys(new QueryPlan(store, command, DatabaseDescriptor.getRangeRpcTimeout()).execute(ReadExecutionController.empty()));
-        Assert.assertTrue(rows.toString(), Arrays.equals(new String[] { "key1", "key2", "key3", "key4" }, rows.toArray(new String[rows.size()])));
+        try (ReadExecutionController controller = command.executionController())
+        {
+            Set<String> rows = getKeys(new QueryPlan(store, command, DatabaseDescriptor.getRangeRpcTimeout()).execute(controller));
+            Assert.assertTrue(rows.toString(), Arrays.equals(new String[] { "key1", "key2", "key3", "key4" }, rows.toArray(new String[rows.size()])));
+        }
     }
 
     @Test
@@ -1471,6 +1601,10 @@ public class SASIIndexTest
         update(rm, name, UTF8Type.instance.decompose("Vijay"), System.currentTimeMillis());
         rm.apply();
 
+        rm = new Mutation(KS_NAME, decoratedKey("key8")); // this name is going to be tokenized
+        update(rm, name, UTF8Type.instance.decompose("Jean-Claude"), System.currentTimeMillis());
+        rm.apply();
+
         // this flush is going to produce range - 'jason' -> 'vijay'
         store.forceBlockingFlush();
 
@@ -1478,11 +1612,12 @@ public class SASIIndexTest
         // since simple interval tree lookup is not going to cover it, prefix lookup actually required.
 
         Set<String> rows;
+
         rows = getIndexed(store, 10, buildExpression(name, Operator.LIKE_PREFIX, UTF8Type.instance.decompose("J")));
-        Assert.assertTrue(rows.toString(), Arrays.equals(new String[] { "key2", "key5", "key6" }, rows.toArray(new String[rows.size()])));
+        Assert.assertTrue(rows.toString(), Arrays.equals(new String[] { "key2", "key5", "key6", "key8"}, rows.toArray(new String[rows.size()])));
 
         rows = getIndexed(store, 10, buildExpression(name, Operator.LIKE_PREFIX, UTF8Type.instance.decompose("j")));
-        Assert.assertTrue(rows.toString(), Arrays.equals(new String[] { "key2", "key5", "key6" }, rows.toArray(new String[rows.size()])));
+        Assert.assertTrue(rows.toString(), Arrays.equals(new String[] { "key2", "key5", "key6", "key8" }, rows.toArray(new String[rows.size()])));
 
         rows = getIndexed(store, 10, buildExpression(name, Operator.LIKE_PREFIX, UTF8Type.instance.decompose("m")));
         Assert.assertTrue(rows.toString(), Arrays.equals(new String[] { "key3", "key4" }, rows.toArray(new String[rows.size()])));
@@ -1495,13 +1630,28 @@ public class SASIIndexTest
 
         rows = getIndexed(store, 10, buildExpression(name, Operator.LIKE_PREFIX, UTF8Type.instance.decompose("j")),
                                      buildExpression(name, Operator.NEQ, UTF8Type.instance.decompose("joh")));
-        Assert.assertTrue(rows.toString(), Arrays.equals(new String[] { "key2", "key6" }, rows.toArray(new String[rows.size()])));
+        Assert.assertTrue(rows.toString(), Arrays.equals(new String[] { "key2", "key6", "key8" }, rows.toArray(new String[rows.size()])));
 
-        rows = getIndexed(store, 10, buildExpression(name, Operator.EQ, UTF8Type.instance.decompose("pavel")));
+        rows = getIndexed(store, 10, buildExpression(name, Operator.LIKE_MATCHES, UTF8Type.instance.decompose("pavel")));
         Assert.assertTrue(rows.toString(), Arrays.equals(new String[] { "key1" }, rows.toArray(new String[rows.size()])));
 
         rows = getIndexed(store, 10, buildExpression(name, Operator.EQ, UTF8Type.instance.decompose("Pave")));
         Assert.assertTrue(rows.isEmpty());
+
+        rows = getIndexed(store, 10, buildExpression(name, Operator.EQ, UTF8Type.instance.decompose("Pavel")));
+        Assert.assertTrue(rows.toString(), Arrays.equals(new String[] { "key1" }, rows.toArray(new String[rows.size()])));
+
+        rows = getIndexed(store, 10, buildExpression(name, Operator.LIKE_MATCHES, UTF8Type.instance.decompose("JeAn")));
+        Assert.assertTrue(rows.toString(), Arrays.equals(new String[] { "key8" }, rows.toArray(new String[rows.size()])));
+
+        rows = getIndexed(store, 10, buildExpression(name, Operator.LIKE_MATCHES, UTF8Type.instance.decompose("claUde")));
+        Assert.assertTrue(rows.toString(), Arrays.equals(new String[] { "key8" }, rows.toArray(new String[rows.size()])));
+
+        rows = getIndexed(store, 10, buildExpression(name, Operator.EQ, UTF8Type.instance.decompose("Jean")));
+        Assert.assertTrue(rows.isEmpty());
+
+        rows = getIndexed(store, 10, buildExpression(name, Operator.EQ, UTF8Type.instance.decompose("Jean-Claude")));
+        Assert.assertTrue(rows.toString(), Arrays.equals(new String[] { "key8" }, rows.toArray(new String[rows.size()])));
     }
 
     @Test
@@ -1587,6 +1737,20 @@ public class SASIIndexTest
 
         Assert.assertEquals(true,  indexE.isIndexed());
         Assert.assertEquals(false, indexE.isLiteral());
+
+        // test frozen-collection
+        ColumnDefinition columnF = ColumnDefinition.regularDef(KS_NAME,
+                                                               CF_NAME,
+                                                               "special-F",
+                                                               ListType.getInstance(UTF8Type.instance, false));
+
+        ColumnIndex indexF = new ColumnIndex(UTF8Type.instance, columnF, IndexMetadata.fromSchemaMetadata("special-index-F", IndexMetadata.Kind.CUSTOM, new HashMap<String, String>()
+        {{
+            put(IndexTarget.CUSTOM_INDEX_OPTION_NAME, SASIIndex.class.getName());
+        }}));
+
+        Assert.assertEquals(true,  indexF.isIndexed());
+        Assert.assertEquals(false, indexF.isLiteral());
     }
 
     @Test
@@ -1599,64 +1763,64 @@ public class SASIIndexTest
 
     public void testClusteringIndexes(boolean forceFlush) throws Exception
     {
-        ColumnFamilyStore store = Keyspace.open(KS_NAME).getColumnFamilyStore(CLUSTERING_CF_NAME);
+        ColumnFamilyStore store = Keyspace.open(KS_NAME).getColumnFamilyStore(CLUSTERING_CF_NAME_1);
 
-        executeCQL("INSERT INTO %s.%s (name, location, age, height, score) VALUES (?, ?, ?, ?, ?)", "Pavel", "US", 27, 183, 1.0);
-        executeCQL("INSERT INTO %s.%s (name, location, age, height, score) VALUES (?, ?, ?, ?, ?)", "Pavel", "BY", 28, 182, 2.0);
-        executeCQL("INSERT INTO %s.%s (name, location, age, height, score) VALUES (?, ?, ?, ?, ?)", "Jordan", "US", 27, 182, 1.0);
+        executeCQL(CLUSTERING_CF_NAME_1, "INSERT INTO %s.%s (name, nickname, location, age, height, score) VALUES (?, ?, ?, ?, ?, ?)", "Pavel", "xedin", "US", 27, 183, 1.0);
+        executeCQL(CLUSTERING_CF_NAME_1, "INSERT INTO %s.%s (name, nickname, location, age, height, score) VALUES (?, ?, ?, ?, ?, ?)", "Pavel", "xedin", "BY", 28, 182, 2.0);
+        executeCQL(CLUSTERING_CF_NAME_1 ,"INSERT INTO %s.%s (name, nickname, location, age, height, score) VALUES (?, ?, ?, ?, ?, ?)", "Jordan", "jrwest", "US", 27, 182, 1.0);
 
         if (forceFlush)
             store.forceBlockingFlush();
 
         UntypedResultSet results;
 
-        results = executeCQL("SELECT * FROM %s.%s WHERE location = ? ALLOW FILTERING", "US");
+        results = executeCQL(CLUSTERING_CF_NAME_1 ,"SELECT * FROM %s.%s WHERE location = ? ALLOW FILTERING", "US");
         Assert.assertNotNull(results);
         Assert.assertEquals(2, results.size());
 
-        results = executeCQL("SELECT * FROM %s.%s WHERE age >= ? AND height = ? ALLOW FILTERING", 27, 182);
+        results = executeCQL(CLUSTERING_CF_NAME_1 ,"SELECT * FROM %s.%s WHERE age >= ? AND height = ? ALLOW FILTERING", 27, 182);
         Assert.assertNotNull(results);
         Assert.assertEquals(2, results.size());
 
-        results = executeCQL("SELECT * FROM %s.%s WHERE age = ? AND height = ? ALLOW FILTERING", 28, 182);
+        results = executeCQL(CLUSTERING_CF_NAME_1 ,"SELECT * FROM %s.%s WHERE age = ? AND height = ? ALLOW FILTERING", 28, 182);
         Assert.assertNotNull(results);
         Assert.assertEquals(1, results.size());
 
-        results = executeCQL("SELECT * FROM %s.%s WHERE age >= ? AND height = ? AND score >= ? ALLOW FILTERING", 27, 182, 1.0);
+        results = executeCQL(CLUSTERING_CF_NAME_1 ,"SELECT * FROM %s.%s WHERE age >= ? AND height = ? AND score >= ? ALLOW FILTERING", 27, 182, 1.0);
         Assert.assertNotNull(results);
         Assert.assertEquals(2, results.size());
 
-        results = executeCQL("SELECT * FROM %s.%s WHERE age >= ? AND height = ? AND score = ? ALLOW FILTERING", 27, 182, 1.0);
+        results = executeCQL(CLUSTERING_CF_NAME_1 ,"SELECT * FROM %s.%s WHERE age >= ? AND height = ? AND score = ? ALLOW FILTERING", 27, 182, 1.0);
         Assert.assertNotNull(results);
         Assert.assertEquals(1, results.size());
 
-        results = executeCQL("SELECT * FROM %s.%s WHERE location = ? AND age >= ? ALLOW FILTERING", "US", 27);
+        results = executeCQL(CLUSTERING_CF_NAME_1 ,"SELECT * FROM %s.%s WHERE location = ? AND age >= ? ALLOW FILTERING", "US", 27);
         Assert.assertNotNull(results);
         Assert.assertEquals(2, results.size());
 
-        results = executeCQL("SELECT * FROM %s.%s WHERE location = ? ALLOW FILTERING", "BY");
+        results = executeCQL(CLUSTERING_CF_NAME_1 ,"SELECT * FROM %s.%s WHERE location = ? ALLOW FILTERING", "BY");
         Assert.assertNotNull(results);
         Assert.assertEquals(1, results.size());
 
-        results = executeCQL("SELECT * FROM %s.%s WHERE location LIKE 'U%%' ALLOW FILTERING");
+        results = executeCQL(CLUSTERING_CF_NAME_1 ,"SELECT * FROM %s.%s WHERE location LIKE 'U%%' ALLOW FILTERING");
         Assert.assertNotNull(results);
         Assert.assertEquals(2, results.size());
 
-        results = executeCQL("SELECT * FROM %s.%s WHERE location LIKE 'U%%' AND height >= 183 ALLOW FILTERING");
+        results = executeCQL(CLUSTERING_CF_NAME_1 ,"SELECT * FROM %s.%s WHERE location LIKE 'U%%' AND height >= 183 ALLOW FILTERING");
         Assert.assertNotNull(results);
         Assert.assertEquals(1, results.size());
 
-        results = executeCQL("SELECT * FROM %s.%s WHERE location LIKE 'US%%' ALLOW FILTERING");
+        results = executeCQL(CLUSTERING_CF_NAME_1 ,"SELECT * FROM %s.%s WHERE location LIKE 'US%%' ALLOW FILTERING");
         Assert.assertNotNull(results);
         Assert.assertEquals(2, results.size());
 
-        results = executeCQL("SELECT * FROM %s.%s WHERE location LIKE 'US' ALLOW FILTERING");
+        results = executeCQL(CLUSTERING_CF_NAME_1 ,"SELECT * FROM %s.%s WHERE location LIKE 'US' ALLOW FILTERING");
         Assert.assertNotNull(results);
         Assert.assertEquals(2, results.size());
 
         try
         {
-            executeCQL("SELECT * FROM %s.%s WHERE location LIKE '%%U' ALLOW FILTERING");
+            executeCQL(CLUSTERING_CF_NAME_1 ,"SELECT * FROM %s.%s WHERE location LIKE '%%U' ALLOW FILTERING");
             Assert.fail();
         }
         catch (InvalidRequestException e)
@@ -1667,10 +1831,10 @@ public class SASIIndexTest
 
         try
         {
-            executeCQL("SELECT * FROM %s.%s WHERE location LIKE '%%' ALLOW FILTERING");
+            executeCQL(CLUSTERING_CF_NAME_1 ,"SELECT * FROM %s.%s WHERE location LIKE '%%' ALLOW FILTERING");
             Assert.fail();
         }
-        catch (SyntaxException e)
+        catch (InvalidRequestException e)
         {
             Assert.assertTrue(e.getMessage().contains("empty"));
             // expected
@@ -1678,14 +1842,650 @@ public class SASIIndexTest
 
         try
         {
-            executeCQL("SELECT * FROM %s.%s WHERE location LIKE '%%%%' ALLOW FILTERING");
+            executeCQL(CLUSTERING_CF_NAME_1 ,"SELECT * FROM %s.%s WHERE location LIKE '%%%%' ALLOW FILTERING");
             Assert.fail();
         }
-        catch (SyntaxException e)
+        catch (InvalidRequestException e)
         {
             Assert.assertTrue(e.getMessage().contains("empty"));
             // expected
         }
+
+        // check restrictions on non-indexed clustering columns when preceding columns are indexed
+        store = Keyspace.open(KS_NAME).getColumnFamilyStore(CLUSTERING_CF_NAME_2);
+        executeCQL(CLUSTERING_CF_NAME_2 ,"INSERT INTO %s.%s (name, nickname, location, age, height, score) VALUES (?, ?, ?, ?, ?, ?)", "Tony", "tony", "US", 43, 184, 2.0);
+        executeCQL(CLUSTERING_CF_NAME_2 ,"INSERT INTO %s.%s (name, nickname, location, age, height, score) VALUES (?, ?, ?, ?, ?, ?)", "Christopher", "chis", "US", 27, 180, 1.0);
+
+        if (forceFlush)
+            store.forceBlockingFlush();
+
+        results = executeCQL(CLUSTERING_CF_NAME_2 ,"SELECT * FROM %s.%s WHERE location LIKE 'US' AND age = 43 ALLOW FILTERING");
+        Assert.assertNotNull(results);
+        Assert.assertEquals(1, results.size());
+        Assert.assertEquals("Tony", results.one().getString("name"));
+    }
+
+    @Test
+    public void testStaticIndex() throws Exception
+    {
+        testStaticIndex(false);
+        cleanupData();
+        testStaticIndex(true);
+    }
+
+    public void testStaticIndex(boolean shouldFlush) throws Exception
+    {
+        ColumnFamilyStore store = Keyspace.open(KS_NAME).getColumnFamilyStore(STATIC_CF_NAME);
+
+        executeCQL(STATIC_CF_NAME, "INSERT INTO %s.%s (sensor_id,sensor_type) VALUES(?, ?)", 1, "TEMPERATURE");
+        executeCQL(STATIC_CF_NAME, "INSERT INTO %s.%s (sensor_id,date,value,variance) VALUES(?, ?, ?, ?)", 1, 20160401L, 24.46, 2);
+        executeCQL(STATIC_CF_NAME, "INSERT INTO %s.%s (sensor_id,date,value,variance) VALUES(?, ?, ?, ?)", 1, 20160402L, 25.62, 5);
+        executeCQL(STATIC_CF_NAME, "INSERT INTO %s.%s (sensor_id,date,value,variance) VALUES(?, ?, ?, ?)", 1, 20160403L, 24.96, 4);
+
+        if (shouldFlush)
+            store.forceBlockingFlush();
+
+        executeCQL(STATIC_CF_NAME, "INSERT INTO %s.%s (sensor_id,sensor_type) VALUES(?, ?)", 2, "PRESSURE");
+        executeCQL(STATIC_CF_NAME, "INSERT INTO %s.%s (sensor_id,date,value,variance) VALUES(?, ?, ?, ?)", 2, 20160401L, 1.03, 9);
+        executeCQL(STATIC_CF_NAME, "INSERT INTO %s.%s (sensor_id,date,value,variance) VALUES(?, ?, ?, ?)", 2, 20160402L, 1.04, 7);
+        executeCQL(STATIC_CF_NAME, "INSERT INTO %s.%s (sensor_id,date,value,variance) VALUES(?, ?, ?, ?)", 2, 20160403L, 1.01, 4);
+
+        if (shouldFlush)
+            store.forceBlockingFlush();
+
+        UntypedResultSet results;
+
+        // Prefix search on static column only
+        results = executeCQL(STATIC_CF_NAME ,"SELECT * FROM %s.%s WHERE sensor_type LIKE 'temp%%'");
+        Assert.assertNotNull(results);
+        Assert.assertEquals(3, results.size());
+
+        Iterator<UntypedResultSet.Row> iterator = results.iterator();
+
+        UntypedResultSet.Row row1 = iterator.next();
+        Assert.assertEquals(20160401L, row1.getLong("date"));
+        Assert.assertEquals(24.46, row1.getDouble("value"));
+        Assert.assertEquals(2, row1.getInt("variance"));
+
+
+        UntypedResultSet.Row row2 = iterator.next();
+        Assert.assertEquals(20160402L, row2.getLong("date"));
+        Assert.assertEquals(25.62, row2.getDouble("value"));
+        Assert.assertEquals(5, row2.getInt("variance"));
+
+        UntypedResultSet.Row row3 = iterator.next();
+        Assert.assertEquals(20160403L, row3.getLong("date"));
+        Assert.assertEquals(24.96, row3.getDouble("value"));
+        Assert.assertEquals(4, row3.getInt("variance"));
+
+
+        // Combined static and non static filtering
+        results = executeCQL(STATIC_CF_NAME ,"SELECT * FROM %s.%s WHERE sensor_type=? AND value >= ? AND value <= ? AND variance=? ALLOW FILTERING",
+                             "pressure", 1.02, 1.05, 7);
+        Assert.assertNotNull(results);
+        Assert.assertEquals(1, results.size());
+
+        row1 = results.one();
+        Assert.assertEquals(20160402L, row1.getLong("date"));
+        Assert.assertEquals(1.04, row1.getDouble("value"));
+        Assert.assertEquals(7, row1.getInt("variance"));
+
+        // Only non statc columns filtering
+        results = executeCQL(STATIC_CF_NAME ,"SELECT * FROM %s.%s WHERE value >= ? AND variance <= ? ALLOW FILTERING", 1.02, 7);
+        Assert.assertNotNull(results);
+        Assert.assertEquals(4, results.size());
+
+        iterator = results.iterator();
+
+        row1 = iterator.next();
+        Assert.assertEquals("TEMPERATURE", row1.getString("sensor_type"));
+        Assert.assertEquals(20160401L, row1.getLong("date"));
+        Assert.assertEquals(24.46, row1.getDouble("value"));
+        Assert.assertEquals(2, row1.getInt("variance"));
+
+
+        row2 = iterator.next();
+        Assert.assertEquals("TEMPERATURE", row2.getString("sensor_type"));
+        Assert.assertEquals(20160402L, row2.getLong("date"));
+        Assert.assertEquals(25.62, row2.getDouble("value"));
+        Assert.assertEquals(5, row2.getInt("variance"));
+
+        row3 = iterator.next();
+        Assert.assertEquals("TEMPERATURE", row3.getString("sensor_type"));
+        Assert.assertEquals(20160403L, row3.getLong("date"));
+        Assert.assertEquals(24.96, row3.getDouble("value"));
+        Assert.assertEquals(4, row3.getInt("variance"));
+
+        UntypedResultSet.Row row4 = iterator.next();
+        Assert.assertEquals("PRESSURE", row4.getString("sensor_type"));
+        Assert.assertEquals(20160402L, row4.getLong("date"));
+        Assert.assertEquals(1.04, row4.getDouble("value"));
+        Assert.assertEquals(7, row4.getInt("variance"));
+    }
+
+    @Test
+    public void testTableRebuild() throws Exception
+    {
+        ColumnFamilyStore store = Keyspace.open(KS_NAME).getColumnFamilyStore(CLUSTERING_CF_NAME_1);
+
+        executeCQL(CLUSTERING_CF_NAME_1, "INSERT INTO %s.%s (name, nickname, location, age, height, score) VALUES (?, ?, ?, ?, ?, ?)", "Pavel", "xedin", "US", 27, 183, 1.0);
+        executeCQL(CLUSTERING_CF_NAME_1, "INSERT INTO %s.%s (name, location, age, height, score) VALUES (?, ?, ?, ?, ?)", "Pavel", "BY", 28, 182, 2.0);
+        executeCQL(CLUSTERING_CF_NAME_1, "INSERT INTO %s.%s (name, nickname, location, age, height, score) VALUES (?, ?, ?, ?, ?, ?)", "Jordan", "jrwest", "US", 27, 182, 1.0);
+
+        store.forceBlockingFlush();
+
+        SSTable ssTable = store.getSSTables(SSTableSet.LIVE).iterator().next();
+        Path path = FileSystems.getDefault().getPath(ssTable.getFilename().replace("-Data", "-SI_age"));
+
+        // Overwrite index file with garbage
+        Writer writer = new FileWriter(path.toFile(), false);
+        writer.write("garbage");
+        writer.close();
+        long size1 = Files.readAttributes(path, BasicFileAttributes.class).size();
+
+        // Trying to query the corrupted index file yields no results
+        Assert.assertTrue(executeCQL(CLUSTERING_CF_NAME_1, "SELECT * FROM %s.%s WHERE age = 27 AND name = 'Pavel'").isEmpty());
+
+        // Rebuld index
+        store.rebuildSecondaryIndex("age");
+
+        long size2 = Files.readAttributes(path, BasicFileAttributes.class).size();
+        // Make sure that garbage was overwriten
+        Assert.assertTrue(size2 > size1);
+
+        // Make sure that indexes work for rebuit tables
+        CQLTester.assertRows(executeCQL(CLUSTERING_CF_NAME_1, "SELECT * FROM %s.%s WHERE age = 27 AND name = 'Pavel'"),
+                             CQLTester.row("Pavel", "US", 27, "xedin", 183, 1.0));
+        CQLTester.assertRows(executeCQL(CLUSTERING_CF_NAME_1, "SELECT * FROM %s.%s WHERE age = 28"),
+                             CQLTester.row("Pavel", "BY", 28, "xedin", 182, 2.0));
+        CQLTester.assertRows(executeCQL(CLUSTERING_CF_NAME_1, "SELECT * FROM %s.%s WHERE score < 2.0 AND nickname = 'jrwest' ALLOW FILTERING"),
+                             CQLTester.row("Jordan", "US", 27, "jrwest", 182, 1.0));
+    }
+
+    @Test
+    public void testIndexRebuild() throws Exception
+    {
+        ColumnFamilyStore store = Keyspace.open(KS_NAME).getColumnFamilyStore(CLUSTERING_CF_NAME_1);
+
+        executeCQL(CLUSTERING_CF_NAME_1, "INSERT INTO %s.%s (name, nickname) VALUES (?, ?)", "Alex", "ifesdjeen");
+
+        store.forceBlockingFlush();
+
+        for (Index index : store.indexManager.listIndexes())
+        {
+            SASIIndex idx = (SASIIndex) index;
+            Assert.assertFalse(idx.getIndex().init(store.getLiveSSTables()).iterator().hasNext());
+        }
+    }
+
+    @Test
+    public void testInvalidIndexOptions()
+    {
+        ColumnFamilyStore store = Keyspace.open(KS_NAME).getColumnFamilyStore(CF_NAME);
+
+        try
+        {
+            // unsupported partition key column
+            SASIIndex.validateOptions(Collections.singletonMap("target", "id"), store.metadata);
+            Assert.fail();
+        }
+        catch (ConfigurationException e)
+        {
+            Assert.assertTrue(e.getMessage().contains("partition key columns are not yet supported by SASI"));
+        }
+
+        try
+        {
+            // invalid index mode
+            SASIIndex.validateOptions(new HashMap<String, String>()
+                                      {{ put("target", "address"); put("mode", "NORMAL"); }},
+                                      store.metadata);
+            Assert.fail();
+        }
+        catch (ConfigurationException e)
+        {
+            Assert.assertTrue(e.getMessage().contains("Incorrect index mode"));
+        }
+
+        try
+        {
+            // invalid SPARSE on the literal index
+            SASIIndex.validateOptions(new HashMap<String, String>()
+                                      {{ put("target", "address"); put("mode", "SPARSE"); }},
+                                      store.metadata);
+            Assert.fail();
+        }
+        catch (ConfigurationException e)
+        {
+            Assert.assertTrue(e.getMessage().contains("non-literal"));
+        }
+
+        try
+        {
+            // invalid SPARSE on the explicitly literal index
+            SASIIndex.validateOptions(new HashMap<String, String>()
+                                      {{ put("target", "height"); put("mode", "SPARSE"); put("is_literal", "true"); }},
+                    store.metadata);
+            Assert.fail();
+        }
+        catch (ConfigurationException e)
+        {
+            Assert.assertTrue(e.getMessage().contains("non-literal"));
+        }
+
+        try
+        {
+            //  SPARSE with analyzer
+            SASIIndex.validateOptions(new HashMap<String, String>()
+                                      {{ put("target", "height"); put("mode", "SPARSE"); put("analyzed", "true"); }},
+                                      store.metadata);
+            Assert.fail();
+        }
+        catch (ConfigurationException e)
+        {
+            Assert.assertTrue(e.getMessage().contains("doesn't support analyzers"));
+        }
+    }
+
+    @Test
+    public void testLIKEAndEQSemanticsWithDifferenceKindsOfIndexes()
+    {
+        String containsTable = "sasi_like_contains_test";
+        String prefixTable = "sasi_like_prefix_test";
+        String analyzedPrefixTable = "sasi_like_analyzed_prefix_test";
+        String tokenizedContainsTable = "sasi_like_analyzed_contains_test";
+
+        QueryProcessor.executeOnceInternal(String.format("CREATE TABLE IF NOT EXISTS %s.%s (k int primary key, v text);", KS_NAME, containsTable));
+        QueryProcessor.executeOnceInternal(String.format("CREATE TABLE IF NOT EXISTS %s.%s (k int primary key, v text);", KS_NAME, prefixTable));
+        QueryProcessor.executeOnceInternal(String.format("CREATE TABLE IF NOT EXISTS %s.%s (k int primary key, v text);", KS_NAME, analyzedPrefixTable));
+        QueryProcessor.executeOnceInternal(String.format("CREATE TABLE IF NOT EXISTS %s.%s (k int primary key, v text);", KS_NAME, tokenizedContainsTable));
+
+        QueryProcessor.executeOnceInternal(String.format("CREATE CUSTOM INDEX IF NOT EXISTS ON %s.%s(v) " +
+                "USING 'org.apache.cassandra.index.sasi.SASIIndex' WITH OPTIONS = { 'mode' : 'CONTAINS', " +
+                                                         "'analyzer_class': 'org.apache.cassandra.index.sasi.analyzer.NonTokenizingAnalyzer', " +
+                                                         "'case_sensitive': 'false' };",
+                                                         KS_NAME, containsTable));
+        QueryProcessor.executeOnceInternal(String.format("CREATE CUSTOM INDEX IF NOT EXISTS ON %s.%s(v) " +
+                "USING 'org.apache.cassandra.index.sasi.SASIIndex' WITH OPTIONS = { 'mode' : 'PREFIX' };", KS_NAME, prefixTable));
+        QueryProcessor.executeOnceInternal(String.format("CREATE CUSTOM INDEX IF NOT EXISTS ON %s.%s(v) " +
+                "USING 'org.apache.cassandra.index.sasi.SASIIndex' WITH OPTIONS = { 'mode' : 'PREFIX', 'analyzed': 'true' };", KS_NAME, analyzedPrefixTable));
+        QueryProcessor.executeOnceInternal(String.format("CREATE CUSTOM INDEX IF NOT EXISTS ON %s.%s(v) " +
+                                                         "USING 'org.apache.cassandra.index.sasi.SASIIndex' WITH OPTIONS = " +
+                                                         "{ 'mode' : 'CONTAINS', 'analyzer_class': 'org.apache.cassandra.index.sasi.analyzer.StandardAnalyzer'," +
+                                                         "'analyzed': 'true', 'tokenization_enable_stemming': 'true', 'tokenization_normalize_lowercase': 'true', " +
+                                                         "'tokenization_locale': 'en' };",
+                                                         KS_NAME, tokenizedContainsTable));
+
+        testLIKEAndEQSemanticsWithDifferenceKindsOfIndexes(containsTable, prefixTable, analyzedPrefixTable, tokenizedContainsTable, false);
+        testLIKEAndEQSemanticsWithDifferenceKindsOfIndexes(containsTable, prefixTable, analyzedPrefixTable, tokenizedContainsTable, true);
+    }
+
+    private void testLIKEAndEQSemanticsWithDifferenceKindsOfIndexes(String containsTable,
+                                                                    String prefixTable,
+                                                                    String analyzedPrefixTable,
+                                                                    String tokenizedContainsTable,
+                                                                    boolean forceFlush)
+    {
+        QueryProcessor.executeOnceInternal(String.format("INSERT INTO %s.%s (k, v) VALUES (?, ?);", KS_NAME, containsTable), 0, "Pavel");
+        QueryProcessor.executeOnceInternal(String.format("INSERT INTO %s.%s (k, v) VALUES (?, ?);", KS_NAME, prefixTable), 0, "Jean-Claude");
+        QueryProcessor.executeOnceInternal(String.format("INSERT INTO %s.%s (k, v) VALUES (?, ?);", KS_NAME, analyzedPrefixTable), 0, "Jean-Claude");
+        QueryProcessor.executeOnceInternal(String.format("INSERT INTO %s.%s (k, v) VALUES (?, ?);", KS_NAME, tokenizedContainsTable), 0, "Pavel");
+
+        if (forceFlush)
+        {
+            Keyspace keyspace = Keyspace.open(KS_NAME);
+            for (String table : Arrays.asList(containsTable, prefixTable, analyzedPrefixTable))
+                keyspace.getColumnFamilyStore(table).forceBlockingFlush();
+        }
+
+        UntypedResultSet results;
+
+        // CONTAINS
+
+        results = QueryProcessor.executeOnceInternal(String.format("SELECT * FROM %s.%s WHERE v LIKE 'Pav';", KS_NAME, containsTable));
+        Assert.assertNotNull(results);
+        Assert.assertEquals(0, results.size());
+
+        results = QueryProcessor.executeOnceInternal(String.format("SELECT * FROM %s.%s WHERE v LIKE 'Pav%%';", KS_NAME, containsTable));
+        Assert.assertNotNull(results);
+        Assert.assertEquals(1, results.size());
+
+        results = QueryProcessor.executeOnceInternal(String.format("SELECT * FROM %s.%s WHERE v LIKE 'Pavel';", KS_NAME, containsTable));
+        Assert.assertNotNull(results);
+        Assert.assertEquals(1, results.size());
+
+        results = QueryProcessor.executeOnceInternal(String.format("SELECT * FROM %s.%s WHERE v = 'Pav';", KS_NAME, containsTable));
+        Assert.assertNotNull(results);
+        Assert.assertEquals(0, results.size());
+
+        results = QueryProcessor.executeOnceInternal(String.format("SELECT * FROM %s.%s WHERE v = 'Pavel';", KS_NAME, containsTable));
+        Assert.assertNotNull(results);
+        Assert.assertEquals(1, results.size());
+
+        try
+        {
+            QueryProcessor.executeOnceInternal(String.format("SELECT * FROM %s.%s WHERE v = 'Pav';", KS_NAME, tokenizedContainsTable));
+            Assert.fail();
+        }
+        catch (InvalidRequestException e)
+        {
+            // expected since CONTAINS + analyzed indexes only support LIKE
+        }
+
+        try
+        {
+            QueryProcessor.executeOnceInternal(String.format("SELECT * FROM %s.%s WHERE v LIKE 'Pav%%';", KS_NAME, tokenizedContainsTable));
+            Assert.fail();
+        }
+        catch (InvalidRequestException e)
+        {
+            // expected since CONTAINS + analyzed only support LIKE
+        }
+
+        results = QueryProcessor.executeOnceInternal(String.format("SELECT * FROM %s.%s WHERE v LIKE 'Pav%%';", KS_NAME, containsTable));
+        Assert.assertNotNull(results);
+        Assert.assertEquals(1, results.size());
+
+        results = QueryProcessor.executeOnceInternal(String.format("SELECT * FROM %s.%s WHERE v LIKE '%%Pav';", KS_NAME, containsTable));
+        Assert.assertNotNull(results);
+        Assert.assertEquals(0, results.size());
+
+        results = QueryProcessor.executeOnceInternal(String.format("SELECT * FROM %s.%s WHERE v LIKE '%%Pav%%';", KS_NAME, containsTable));
+        Assert.assertNotNull(results);
+        Assert.assertEquals(1, results.size());
+
+        // PREFIX
+
+        results = QueryProcessor.executeOnceInternal(String.format("SELECT * FROM %s.%s WHERE v = 'Jean';", KS_NAME, prefixTable));
+        Assert.assertNotNull(results);
+        Assert.assertEquals(0, results.size());
+
+        results = QueryProcessor.executeOnceInternal(String.format("SELECT * FROM %s.%s WHERE v = 'Jean-Claude';", KS_NAME, prefixTable));
+        Assert.assertNotNull(results);
+        Assert.assertEquals(1, results.size());
+
+        results = QueryProcessor.executeOnceInternal(String.format("SELECT * FROM %s.%s WHERE v LIKE 'Jea';", KS_NAME, prefixTable));
+        Assert.assertNotNull(results);
+        Assert.assertEquals(0, results.size());
+
+        results = QueryProcessor.executeOnceInternal(String.format("SELECT * FROM %s.%s WHERE v LIKE 'Jea%%';", KS_NAME, prefixTable));
+        Assert.assertNotNull(results);
+        Assert.assertEquals(1, results.size());
+
+        try
+        {
+            QueryProcessor.executeOnceInternal(String.format("SELECT * FROM %s.%s WHERE v LIKE '%%Jea';", KS_NAME, prefixTable));
+            Assert.fail();
+        }
+        catch (InvalidRequestException e)
+        {
+            // expected since PREFIX indexes only support LIKE '<term>%'
+        }
+
+        try
+        {
+            QueryProcessor.executeOnceInternal(String.format("SELECT * FROM %s.%s WHERE v LIKE '%%Jea%%';", KS_NAME, prefixTable));
+            Assert.fail();
+        }
+        catch (InvalidRequestException e)
+        {
+            // expected since PREFIX indexes only support LIKE '<term>%'
+        }
+
+        // PREFIX + analyzer
+
+        try
+        {
+            QueryProcessor.executeOnceInternal(String.format("SELECT * FROM %s.%s WHERE v = 'Jean';", KS_NAME, analyzedPrefixTable));
+            Assert.fail();
+        }
+        catch (InvalidRequestException e)
+        {
+            // expected since PREFIX indexes only support EQ without tokenization
+        }
+
+        results = QueryProcessor.executeOnceInternal(String.format("SELECT * FROM %s.%s WHERE v LIKE 'Jean';", KS_NAME, analyzedPrefixTable));
+        Assert.assertNotNull(results);
+        Assert.assertEquals(1, results.size());
+
+        results = QueryProcessor.executeOnceInternal(String.format("SELECT * FROM %s.%s WHERE v LIKE 'Claude';", KS_NAME, analyzedPrefixTable));
+        Assert.assertNotNull(results);
+        Assert.assertEquals(1, results.size());
+
+        results = QueryProcessor.executeOnceInternal(String.format("SELECT * FROM %s.%s WHERE v LIKE 'Jean-Claude';", KS_NAME, analyzedPrefixTable));
+        Assert.assertNotNull(results);
+        Assert.assertEquals(1, results.size());
+
+        results = QueryProcessor.executeOnceInternal(String.format("SELECT * FROM %s.%s WHERE v LIKE 'Jean%%';", KS_NAME, analyzedPrefixTable));
+        Assert.assertNotNull(results);
+        Assert.assertEquals(1, results.size());
+
+        results = QueryProcessor.executeOnceInternal(String.format("SELECT * FROM %s.%s WHERE v LIKE 'Claude%%';", KS_NAME, analyzedPrefixTable));
+        Assert.assertNotNull(results);
+        Assert.assertEquals(1, results.size());
+
+        try
+        {
+            QueryProcessor.executeOnceInternal(String.format("SELECT * FROM %s.%s WHERE v LIKE '%%Jean';", KS_NAME, analyzedPrefixTable));
+            Assert.fail();
+        }
+        catch (InvalidRequestException e)
+        {
+            // expected since PREFIX indexes only support LIKE '<term>%' and LIKE '<term>'
+        }
+
+        try
+        {
+            QueryProcessor.executeOnceInternal(String.format("SELECT * FROM %s.%s WHERE v LIKE '%%Claude%%';", KS_NAME, analyzedPrefixTable));
+            Assert.fail();
+        }
+        catch (InvalidRequestException e)
+        {
+            // expected since PREFIX indexes only support LIKE '<term>%' and LIKE '<term>'
+        }
+
+        for (String table : Arrays.asList(containsTable, prefixTable, analyzedPrefixTable))
+            QueryProcessor.executeOnceInternal(String.format("TRUNCATE TABLE %s.%s", KS_NAME, table));
+    }
+
+    @Test
+    public void testConditionalsWithReversedType()
+    {
+        final String TABLE_NAME = "reversed_clustering";
+
+        QueryProcessor.executeOnceInternal(String.format("CREATE TABLE IF NOT EXISTS %s.%s (pk text, ck int, v int, PRIMARY KEY (pk, ck)) " +
+                                                         "WITH CLUSTERING ORDER BY (ck DESC);", KS_NAME, TABLE_NAME));
+        QueryProcessor.executeOnceInternal(String.format("CREATE CUSTOM INDEX ON %s.%s (ck) USING 'org.apache.cassandra.index.sasi.SASIIndex'", KS_NAME, TABLE_NAME));
+        QueryProcessor.executeOnceInternal(String.format("CREATE CUSTOM INDEX ON %s.%s (v) USING 'org.apache.cassandra.index.sasi.SASIIndex'", KS_NAME, TABLE_NAME));
+
+        QueryProcessor.executeOnceInternal(String.format("INSERT INTO %s.%s (pk, ck, v) VALUES ('Alex', 1, 1);", KS_NAME, TABLE_NAME));
+        QueryProcessor.executeOnceInternal(String.format("INSERT INTO %s.%s (pk, ck, v) VALUES ('Alex', 2, 2);", KS_NAME, TABLE_NAME));
+        QueryProcessor.executeOnceInternal(String.format("INSERT INTO %s.%s (pk, ck, v) VALUES ('Alex', 3, 3);", KS_NAME, TABLE_NAME));
+        QueryProcessor.executeOnceInternal(String.format("INSERT INTO %s.%s (pk, ck, v) VALUES ('Tom', 1, 1);", KS_NAME, TABLE_NAME));
+        QueryProcessor.executeOnceInternal(String.format("INSERT INTO %s.%s (pk, ck, v) VALUES ('Tom', 2, 2);", KS_NAME, TABLE_NAME));
+        QueryProcessor.executeOnceInternal(String.format("INSERT INTO %s.%s (pk, ck, v) VALUES ('Tom', 3, 3);", KS_NAME, TABLE_NAME));
+
+        UntypedResultSet resultSet = QueryProcessor.executeOnceInternal(String.format("SELECT * FROM %s.%s WHERE ck <= 2;", KS_NAME, TABLE_NAME));
+
+        CQLTester.assertRowsIgnoringOrder(resultSet,
+                                          CQLTester.row("Alex", 1, 1),
+                                          CQLTester.row("Alex", 2, 2),
+                                          CQLTester.row("Tom", 1, 1),
+                                          CQLTester.row("Tom", 2, 2));
+
+        resultSet = QueryProcessor.executeOnceInternal(String.format("SELECT * FROM %s.%s WHERE ck <= 2 AND v > 1 ALLOW FILTERING;", KS_NAME, TABLE_NAME));
+
+        CQLTester.assertRowsIgnoringOrder(resultSet,
+                                          CQLTester.row("Alex", 2, 2),
+                                          CQLTester.row("Tom", 2, 2));
+
+        resultSet = QueryProcessor.executeOnceInternal(String.format("SELECT * FROM %s.%s WHERE ck < 2;", KS_NAME, TABLE_NAME));
+        CQLTester.assertRowsIgnoringOrder(resultSet,
+                                          CQLTester.row("Alex", 1, 1),
+                                          CQLTester.row("Tom", 1, 1));
+
+        resultSet = QueryProcessor.executeOnceInternal(String.format("SELECT * FROM %s.%s WHERE ck >= 2;", KS_NAME, TABLE_NAME));
+        CQLTester.assertRowsIgnoringOrder(resultSet,
+                                          CQLTester.row("Alex", 2, 2),
+                                          CQLTester.row("Alex", 3, 3),
+                                          CQLTester.row("Tom", 2, 2),
+                                          CQLTester.row("Tom", 3, 3));
+
+        resultSet = QueryProcessor.executeOnceInternal(String.format("SELECT * FROM %s.%s WHERE ck >= 2 AND v < 3 ALLOW FILTERING;", KS_NAME, TABLE_NAME));
+        CQLTester.assertRowsIgnoringOrder(resultSet,
+                                          CQLTester.row("Alex", 2, 2),
+                                          CQLTester.row("Tom", 2, 2));
+
+        resultSet = QueryProcessor.executeOnceInternal(String.format("SELECT * FROM %s.%s WHERE ck > 2;", KS_NAME, TABLE_NAME));
+        CQLTester.assertRowsIgnoringOrder(resultSet,
+                                          CQLTester.row("Alex", 3, 3),
+                                          CQLTester.row("Tom", 3, 3));
+    }
+
+    @Test
+    public void testIndexMemtableSwitching()
+    {
+        // write some data but don't flush
+        ColumnFamilyStore store = loadData(new HashMap<String, Pair<String, Integer>>()
+        {{
+            put("key1", Pair.create("Pavel", 14));
+        }}, false);
+
+        ColumnIndex index = ((SASIIndex) store.indexManager.getIndexByName("first_name")).getIndex();
+        IndexMemtable beforeFlushMemtable = index.getCurrentMemtable();
+
+        PartitionRangeReadCommand command =
+            PartitionRangeReadCommand.create(false,
+                                             store.metadata,
+                                             FBUtilities.nowInSeconds(),
+                                             ColumnFilter.all(store.metadata),
+                                             RowFilter.NONE,
+                                             DataLimits.NONE,
+                                             DataRange.allData(store.getPartitioner()));
+
+        QueryController controller = new QueryController(store, command, Integer.MAX_VALUE);
+        org.apache.cassandra.index.sasi.plan.Expression expression =
+                new org.apache.cassandra.index.sasi.plan.Expression(controller, index)
+                                                    .add(Operator.LIKE_MATCHES, UTF8Type.instance.fromString("Pavel"));
+
+        Assert.assertTrue(beforeFlushMemtable.search(expression).getCount() > 0);
+
+        store.forceBlockingFlush();
+
+        IndexMemtable afterFlushMemtable = index.getCurrentMemtable();
+
+        Assert.assertNotSame(afterFlushMemtable, beforeFlushMemtable);
+        Assert.assertEquals(afterFlushMemtable.search(expression).getCount(), 0);
+        Assert.assertEquals(0, index.getPendingMemtables().size());
+
+        loadData(new HashMap<String, Pair<String, Integer>>()
+        {{
+            put("key2", Pair.create("Sam", 15));
+        }}, false);
+
+        expression = new org.apache.cassandra.index.sasi.plan.Expression(controller, index)
+                        .add(Operator.LIKE_MATCHES, UTF8Type.instance.fromString("Sam"));
+
+        beforeFlushMemtable = index.getCurrentMemtable();
+        Assert.assertTrue(beforeFlushMemtable.search(expression).getCount() > 0);
+
+        // let's emulate switching memtable and see if we can still read-data in "pending"
+        index.switchMemtable(store.getTracker().getView().getCurrentMemtable());
+
+        Assert.assertNotSame(index.getCurrentMemtable(), beforeFlushMemtable);
+        Assert.assertEquals(1, index.getPendingMemtables().size());
+
+        Assert.assertTrue(index.searchMemtable(expression).getCount() > 0);
+
+        // emulate "everything is flushed" notification
+        index.discardMemtable(store.getTracker().getView().getCurrentMemtable());
+
+        Assert.assertEquals(0, index.getPendingMemtables().size());
+        Assert.assertEquals(index.searchMemtable(expression).getCount(), 0);
+
+        // test discarding data from memtable
+        loadData(new HashMap<String, Pair<String, Integer>>()
+        {{
+            put("key3", Pair.create("Jonathan", 16));
+        }}, false);
+
+        expression = new org.apache.cassandra.index.sasi.plan.Expression(controller, index)
+                .add(Operator.LIKE_MATCHES, UTF8Type.instance.fromString("Jonathan"));
+
+        Assert.assertTrue(index.searchMemtable(expression).getCount() > 0);
+
+        index.switchMemtable();
+        Assert.assertEquals(index.searchMemtable(expression).getCount(), 0);
+    }
+
+    @Test
+    public void testAnalyzerValidation()
+    {
+        final String TABLE_NAME = "analyzer_validation";
+        QueryProcessor.executeOnceInternal(String.format("CREATE TABLE %s.%s (" +
+                                                         "  pk text PRIMARY KEY, " +
+                                                         "  ascii_v ascii, " +
+                                                         "  bigint_v bigint, " +
+                                                         "  blob_v blob, " +
+                                                         "  boolean_v boolean, " +
+                                                         "  date_v date, " +
+                                                         "  decimal_v decimal, " +
+                                                         "  double_v double, " +
+                                                         "  float_v float, " +
+                                                         "  inet_v inet, " +
+                                                         "  int_v int, " +
+                                                         "  smallint_v smallint, " +
+                                                         "  text_v text, " +
+                                                         "  time_v time, " +
+                                                         "  timestamp_v timestamp, " +
+                                                         "  timeuuid_v timeuuid, " +
+                                                         "  tinyint_v tinyint, " +
+                                                         "  uuid_v uuid, " +
+                                                         "  varchar_v varchar, " +
+                                                         "  varint_v varint" +
+                                                         ");",
+                                                         KS_NAME,
+                                                         TABLE_NAME));
+
+        Columns regulars = Schema.instance.getCFMetaData(KS_NAME, TABLE_NAME).partitionColumns().regulars;
+        List<String> allColumns = regulars.stream().map(ColumnDefinition::toString).collect(Collectors.toList());
+        List<String> textColumns = Arrays.asList("text_v", "ascii_v", "varchar_v");
+
+        new HashMap<Class<? extends AbstractAnalyzer>, List<String>>()
+        {{
+            put(StandardAnalyzer.class, textColumns);
+            put(NonTokenizingAnalyzer.class, textColumns);
+            put(DelimiterAnalyzer.class, textColumns);
+            put(NoOpAnalyzer.class, allColumns);
+        }}
+        .forEach((analyzer, supportedColumns) -> {
+            for (String column : allColumns)
+            {
+                String query = String.format("CREATE CUSTOM INDEX ON %s.%s(%s) " +
+                                             "USING 'org.apache.cassandra.index.sasi.SASIIndex' " +
+                                             "WITH OPTIONS = {'analyzer_class': '%s', 'mode':'PREFIX'};",
+                                             KS_NAME, TABLE_NAME, column, analyzer.getName());
+
+                if (supportedColumns.contains(column))
+                {
+                    QueryProcessor.executeOnceInternal(query);
+                }
+                else
+                {
+                    try
+                    {
+                        QueryProcessor.executeOnceInternal(query);
+                        Assert.fail("Expected ConfigurationException");
+                    }
+                    catch (ConfigurationException e)
+                    {
+                        // expected
+                        Assert.assertTrue("Unexpected error message " + e.getMessage(),
+                                          e.getMessage().contains("does not support type"));
+                    }
+                }
+            }
+        });
     }
 
     private static ColumnFamilyStore loadData(Map<String, Pair<String, Integer>> data, boolean forceFlush)
@@ -1710,7 +2510,7 @@ public class SASIIndexTest
     {
         Keyspace ks = Keyspace.open(KS_NAME);
         ks.getColumnFamilyStore(CF_NAME).truncateBlocking();
-        ks.getColumnFamilyStore(CLUSTERING_CF_NAME).truncateBlocking();
+        ks.getColumnFamilyStore(CLUSTERING_CF_NAME_1).truncateBlocking();
     }
 
     private static Set<String> getIndexed(ColumnFamilyStore store, int maxResults, Expression... expressions)
@@ -1765,13 +2565,14 @@ public class SASIIndexTest
         for (Expression e : expressions)
             filter.add(store.metadata.getColumnDefinition(e.name), e.op, e.value);
 
-        ReadCommand command = new PartitionRangeReadCommand(store.metadata,
-                                                            FBUtilities.nowInSeconds(),
-                                                            columnFilter,
-                                                            filter,
-                                                            DataLimits.thriftLimits(maxResults, DataLimits.NO_LIMIT),
-                                                            range,
-                                                            Optional.empty());
+        ReadCommand command =
+            PartitionRangeReadCommand.create(false,
+                                             store.metadata,
+                                             FBUtilities.nowInSeconds(),
+                                             columnFilter,
+                                             filter,
+                                             DataLimits.thriftLimits(maxResults, DataLimits.NO_LIMIT),
+                                             range);
 
         return command.executeLocally(command.executionController());
     }
@@ -1802,7 +2603,8 @@ public class SASIIndexTest
                 {
                     try (UnfilteredRowIterator row = rows.next())
                     {
-                        add(AsciiType.instance.compose(row.partitionKey().getKey()));
+                        if (!row.isEmpty())
+                            add(AsciiType.instance.compose(row.partitionKey().getKey()));
                     }
                 }
             }};
@@ -1822,14 +2624,14 @@ public class SASIIndexTest
         }};
     }
 
-    private UntypedResultSet executeCQL(String query, Object... values)
+    private UntypedResultSet executeCQL(String cfName, String query, Object... values)
     {
-        return QueryProcessor.executeOnceInternal(String.format(query, KS_NAME, CLUSTERING_CF_NAME), values);
+        return QueryProcessor.executeOnceInternal(String.format(query, KS_NAME, cfName), values);
     }
 
     private Set<String> executeCQLWithKeys(String rawStatement) throws Exception
     {
-        SelectStatement statement = (SelectStatement) QueryProcessor.parseStatement(rawStatement).prepare().statement;
+        SelectStatement statement = (SelectStatement) QueryProcessor.parseStatement(rawStatement).prepare(ClientState.forInternalCalls()).statement;
         ResultMessage.Rows cqlRows = statement.executeInternal(QueryState.forInternalCalls(), QueryOptions.DEFAULT);
 
         Set<String> results = new TreeSet<>();
@@ -1873,14 +2675,14 @@ public class SASIIndexTest
     private static Cell buildCell(ByteBuffer name, ByteBuffer value, long timestamp)
     {
         CFMetaData cfm = Keyspace.open(KS_NAME).getColumnFamilyStore(CF_NAME).metadata;
-        return BufferCell.live(cfm, cfm.getColumnDefinition(name), timestamp, value);
+        return BufferCell.live(cfm.getColumnDefinition(name), timestamp, value);
     }
 
     private static Cell buildCell(CFMetaData cfm, ByteBuffer name, ByteBuffer value, long timestamp)
     {
         ColumnDefinition column = cfm.getColumnDefinition(name);
         assert column != null;
-        return BufferCell.live(cfm, column, timestamp, value);
+        return BufferCell.live(column, timestamp, value);
     }
 
     private static Expression buildExpression(ByteBuffer name, Operator op, ByteBuffer value)

@@ -26,11 +26,11 @@ import com.google.common.collect.TreeMultimap;
 import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.cql3.ColumnIdentifier;
 import org.apache.cassandra.db.*;
-import org.apache.cassandra.db.rows.Cell;
 import org.apache.cassandra.db.rows.CellPath;
 import org.apache.cassandra.config.ColumnDefinition;
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
+import org.apache.cassandra.net.MessagingService;
 
 /**
  * Represents which (non-PK) columns (and optionally which sub-part of a column for complex columns) are selected
@@ -67,20 +67,19 @@ public class ColumnFilter
     // then _fetched_ == _queried_ and we only store _queried_.
     private final boolean isFetchAll;
 
-    private final CFMetaData metadata; // can be null if !isFetchAll
-
+    private final PartitionColumns fetched;
     private final PartitionColumns queried; // can be null if isFetchAll and _fetched_ == _queried_
     private final SortedSetMultimap<ColumnIdentifier, ColumnSubselection> subSelections; // can be null
 
     private ColumnFilter(boolean isFetchAll,
-                         CFMetaData metadata,
+                         PartitionColumns fetched,
                          PartitionColumns queried,
                          SortedSetMultimap<ColumnIdentifier, ColumnSubselection> subSelections)
     {
-        assert !isFetchAll || metadata != null;
+        assert !isFetchAll || fetched != null;
         assert isFetchAll || queried != null;
         this.isFetchAll = isFetchAll;
-        this.metadata = metadata;
+        this.fetched = isFetchAll ? fetched : queried;
         this.queried = queried;
         this.subSelections = subSelections;
     }
@@ -90,7 +89,7 @@ public class ColumnFilter
      */
     public static ColumnFilter all(CFMetaData metadata)
     {
-        return new ColumnFilter(true, metadata, null, null);
+        return new ColumnFilter(true, metadata.partitionColumns(), null, null);
     }
 
     /**
@@ -105,6 +104,15 @@ public class ColumnFilter
         return new ColumnFilter(false, null, columns, null);
     }
 
+	/**
+     * A filter that fetches all columns for the provided table, but returns
+     * only the queried ones.
+     */
+    public static ColumnFilter selection(CFMetaData metadata, PartitionColumns queried)
+    {
+        return new ColumnFilter(true, metadata.partitionColumns(), queried, null);
+    }
+
     /**
      * The columns that needs to be fetched internally for this filter.
      *
@@ -112,7 +120,7 @@ public class ColumnFilter
      */
     public PartitionColumns fetchedColumns()
     {
-        return isFetchAll ? metadata.partitionColumns() : queried;
+        return fetched;
     }
 
     /**
@@ -122,8 +130,7 @@ public class ColumnFilter
      */
     public PartitionColumns queriedColumns()
     {
-        assert queried != null || isFetchAll;
-        return queried == null ? metadata.partitionColumns() : queried;
+        return queried == null ? fetched : queried;
     }
 
     public boolean fetchesAllColumns()
@@ -272,12 +279,12 @@ public class ColumnFilter
      * A builder for a {@code ColumnFilter} object.
      *
      * Note that the columns added to this build are the _queried_ column. Whether or not all columns
-     * are _fetched_ depends on which ctor you've used to obtained this builder, allColumnsBuilder (all
+     * are _fetched_ depends on which constructor you've used to obtained this builder, allColumnsBuilder (all
      * columns are fetched) or selectionBuilder (only the queried columns are fetched).
      *
      * Note that for a allColumnsBuilder, if no queried columns are added, this is interpreted as querying
      * all columns, not querying none (but if you know you want to query all columns, prefer
-     * {@link ColumnFilter#all)}. For selectionBuilder, adding no queried columns means no column will be
+     * {@link ColumnFilter#all(CFMetaData)}. For selectionBuilder, adding no queried columns means no column will be
      * fetched (so the builder will return {@code PartitionColumns.NONE}).
      */
     public static class Builder
@@ -344,8 +351,25 @@ public class ColumnFilter
                     s.put(subSelection.column().name, subSelection);
             }
 
-            return new ColumnFilter(isFetchAll, metadata, queried, s);
+            return new ColumnFilter(isFetchAll, isFetchAll ? metadata.partitionColumns() : null, queried, s);
         }
+    }
+
+    @Override
+    public boolean equals(Object other)
+    {
+        if (other == this)
+            return true;
+
+        if (!(other instanceof ColumnFilter))
+            return false;
+
+        ColumnFilter otherCf = (ColumnFilter) other;
+
+        return otherCf.isFetchAll == this.isFetchAll &&
+               Objects.equals(otherCf.fetched, this.fetched) &&
+               Objects.equals(otherCf.queried, this.queried) &&
+               Objects.equals(otherCf.subSelections, this.subSelections);
     }
 
     @Override
@@ -408,6 +432,12 @@ public class ColumnFilter
         {
             out.writeByte(makeHeaderByte(selection));
 
+            if (version >= MessagingService.VERSION_3014 && selection.isFetchAll)
+            {
+                Columns.serializer.serialize(selection.fetched.statics, out);
+                Columns.serializer.serialize(selection.fetched.regulars, out);
+            }
+
             if (selection.queried != null)
             {
                 Columns.serializer.serialize(selection.queried.statics, out);
@@ -429,7 +459,23 @@ public class ColumnFilter
             boolean hasQueried = (header & HAS_QUERIED_MASK) != 0;
             boolean hasSubSelections = (header & HAS_SUB_SELECTIONS_MASK) != 0;
 
+            PartitionColumns fetched = null;
             PartitionColumns queried = null;
+
+            if (isFetchAll)
+            {
+                if (version >= MessagingService.VERSION_3014)
+                {
+                    Columns statics = Columns.serializer.deserialize(in, metadata);
+                    Columns regulars = Columns.serializer.deserialize(in, metadata);
+                    fetched = new PartitionColumns(statics, regulars);
+                }
+                else
+                {
+                    fetched = metadata.partitionColumns();
+                }
+            }
+
             if (hasQueried)
             {
                 Columns statics = Columns.serializer.deserialize(in, metadata);
@@ -449,12 +495,18 @@ public class ColumnFilter
                 }
             }
 
-            return new ColumnFilter(isFetchAll, isFetchAll ? metadata : null, queried, subSelections);
+            return new ColumnFilter(isFetchAll, fetched, queried, subSelections);
         }
 
         public long serializedSize(ColumnFilter selection, int version)
         {
             long size = 1; // header byte
+
+            if (version >= MessagingService.VERSION_3014 && selection.isFetchAll)
+            {
+                size += Columns.serializer.serializedSize(selection.fetched.statics);
+                size += Columns.serializer.serializedSize(selection.fetched.regulars);
+            }
 
             if (selection.queried != null)
             {

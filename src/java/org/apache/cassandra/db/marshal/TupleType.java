@@ -23,13 +23,16 @@ import java.util.Arrays;
 import java.util.Iterator;
 import java.util.List;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 import com.google.common.base.Objects;
 
 import org.apache.cassandra.cql3.*;
 import org.apache.cassandra.exceptions.ConfigurationException;
+import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.exceptions.SyntaxException;
 import org.apache.cassandra.serializers.*;
+import org.apache.cassandra.transport.ProtocolVersion;
 import org.apache.cassandra.utils.ByteBufferUtil;
 
 /**
@@ -49,12 +52,30 @@ public class TupleType extends AbstractType<ByteBuffer>
     
     protected final List<AbstractType<?>> types;
 
+    private final TupleSerializer serializer;
+
     public TupleType(List<AbstractType<?>> types)
     {
+        this(types, true);
+    }
+
+    protected TupleType(List<AbstractType<?>> types, boolean freezeInner)
+    {
         super(ComparisonType.CUSTOM);
-        for (int i = 0; i < types.size(); i++)
-            types.set(i, types.get(i).freeze());
-        this.types = types;
+        if (freezeInner)
+            this.types = types.stream().map(AbstractType::freeze).collect(Collectors.toList());
+        else
+            this.types = types;
+        this.serializer = new TupleSerializer(fieldSerializers(types));
+    }
+
+    private static List<TypeSerializer<?>> fieldSerializers(List<AbstractType<?>> types)
+    {
+        int size = types.size();
+        List<TypeSerializer<?>> serializers = new ArrayList<>(size);
+        for (int i = 0; i < size; i++)
+            serializers.add(types.get(i).getSerializer());
+        return serializers;
     }
 
     public static TupleType getInstance(TypeParser parser) throws ConfigurationException, SyntaxException
@@ -66,14 +87,15 @@ public class TupleType extends AbstractType<ByteBuffer>
     }
 
     @Override
-    public boolean references(AbstractType<?> check)
+    public boolean referencesUserType(String name)
     {
-        if (super.references(check))
-            return true;
-        for (AbstractType<?> type : types)
-            if (type.references(check))
-                return true;
-        return false;
+        return allTypes().stream().anyMatch(f -> f.referencesUserType(name));
+    }
+
+    @Override
+    public boolean referencesDuration()
+    {
+        return allTypes().stream().anyMatch(f -> f.referencesDuration());
     }
 
     public AbstractType<?> type(int i)
@@ -123,42 +145,22 @@ public class TupleType extends AbstractType<ByteBuffer>
                 return cmp;
         }
 
-        if (bb1.remaining() == 0)
-            return bb2.remaining() == 0 ? 0 : -1;
-
-        // bb1.remaining() > 0 && bb2.remaining() == 0
-        return 1;
-    }
-
-    @Override
-    public void validate(ByteBuffer bytes) throws MarshalException
-    {
-        ByteBuffer input = bytes.duplicate();
-        for (int i = 0; i < size(); i++)
+        // handle trailing nulls
+        while (bb1.remaining() > 0)
         {
-            // we allow the input to have less fields than declared so as to support field addition.
-            if (!input.hasRemaining())
-                return;
-
-            if (input.remaining() < 4)
-                throw new MarshalException(String.format("Not enough bytes to read size of %dth component", i));
-
-            int size = input.getInt();
-
-            // size < 0 means null value
-            if (size < 0)
-                continue;
-
-            if (input.remaining() < size)
-                throw new MarshalException(String.format("Not enough bytes to read %dth component", i));
-
-            ByteBuffer field = ByteBufferUtil.readBytes(input, size);
-            types.get(i).validate(field);
+            int size = bb1.getInt();
+            if (size > 0) // non-null
+                return 1;
         }
 
-        // We're allowed to get less fields than declared, but not more
-        if (input.hasRemaining())
-            throw new MarshalException("Invalid remaining data after end of tuple value");
+        while (bb2.remaining() > 0)
+        {
+            int size = bb2.getInt();
+            if (size > 0) // non-null
+                return -1;
+        }
+
+        return 0;
     }
 
     /**
@@ -174,8 +176,22 @@ public class TupleType extends AbstractType<ByteBuffer>
                 return Arrays.copyOfRange(components, 0, i);
 
             int size = input.getInt();
+
+            if (input.remaining() < size)
+                throw new MarshalException(String.format("Not enough bytes to read %dth component", i));
+
+            // size < 0 means null value
             components[i] = size < 0 ? null : ByteBufferUtil.readBytes(input, size);
         }
+
+        // error out if we got more values in the tuple/UDT than we expected
+        if (input.hasRemaining())
+        {
+            throw new InvalidRequestException(String.format(
+                    "Expected %s %s for %s column, but got more",
+                    size(), size() == 1 ? "value" : "values", this.asCQL3Type()));
+        }
+
         return components;
     }
 
@@ -205,6 +221,9 @@ public class TupleType extends AbstractType<ByteBuffer>
     @Override
     public String getString(ByteBuffer value)
     {
+        if (value == null)
+            return "null";
+
         StringBuilder sb = new StringBuilder();
         ByteBuffer input = value.duplicate();
         for (int i = 0; i < size(); i++)
@@ -293,15 +312,16 @@ public class TupleType extends AbstractType<ByteBuffer>
     }
 
     @Override
-    public String toJSONString(ByteBuffer buffer, int protocolVersion)
+    public String toJSONString(ByteBuffer buffer, ProtocolVersion protocolVersion)
     {
+        ByteBuffer duplicated = buffer.duplicate();
         StringBuilder sb = new StringBuilder("[");
         for (int i = 0; i < types.size(); i++)
         {
             if (i > 0)
                 sb.append(", ");
 
-            ByteBuffer value = CollectionSerializer.readValue(buffer, protocolVersion);
+            ByteBuffer value = CollectionSerializer.readValue(duplicated, protocolVersion);
             if (value == null)
                 sb.append("null");
             else
@@ -312,7 +332,7 @@ public class TupleType extends AbstractType<ByteBuffer>
 
     public TypeSerializer<ByteBuffer> getSerializer()
     {
-        return BytesSerializer.instance;
+        return serializer;
     }
 
     @Override
@@ -371,6 +391,12 @@ public class TupleType extends AbstractType<ByteBuffer>
 
         TupleType that = (TupleType)o;
         return types.equals(that.types);
+    }
+
+    @Override
+    public boolean isTuple()
+    {
+        return true;
     }
 
     @Override

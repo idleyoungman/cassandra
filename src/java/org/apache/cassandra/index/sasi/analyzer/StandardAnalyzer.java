@@ -22,10 +22,14 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.Reader;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
 
 import org.apache.cassandra.index.sasi.analyzer.filter.*;
 import org.apache.cassandra.db.marshal.AbstractType;
+import org.apache.cassandra.db.marshal.AsciiType;
 import org.apache.cassandra.db.marshal.UTF8Type;
 import org.apache.cassandra.io.util.DataInputBuffer;
 import org.apache.cassandra.utils.ByteBufferUtil;
@@ -37,6 +41,15 @@ import com.carrotsearch.hppc.IntObjectOpenHashMap;
 
 public class StandardAnalyzer extends AbstractAnalyzer
 {
+
+    private static final Set<AbstractType<?>> VALID_ANALYZABLE_TYPES = new HashSet<AbstractType<?>>()
+    {
+        {
+            add(UTF8Type.instance);
+            add(AsciiType.instance);
+        }
+    };
+
     public enum TokenType
     {
         EOF(-1),
@@ -128,10 +141,10 @@ public class StandardAnalyzer extends AbstractAnalyzer
             builder = builder.add("to_lower", new BasicResultFilters.LowerCase());
         if (!options.isCaseSensitive() && options.shouldUpperCaseTerms())
             builder = builder.add("to_upper", new BasicResultFilters.UpperCase());
-        if (options.shouldStemTerms())
-            builder = builder.add("term_stemming", new StemmingFilters.DefaultStemmingFilter(options.getLocale()));
         if (options.shouldIgnoreStopTerms())
             builder = builder.add("skip_stop_words", new StopWordFilters.DefaultStopWordFilter(options.getLocale()));
+        if (options.shouldStemTerms())
+            builder = builder.add("term_stemming", new StemmingFilters.DefaultStemmingFilter(options.getLocale()));
         return builder.build();
     }
 
@@ -152,7 +165,7 @@ public class StandardAnalyzer extends AbstractAnalyzer
         this.options = tokenizerOptions;
         this.filterPipeline = getFilterPipeline();
 
-        Reader reader = new InputStreamReader(new DataInputBuffer(ByteBufferUtil.EMPTY_BYTE_BUFFER, false));
+        Reader reader = new InputStreamReader(new DataInputBuffer(ByteBufferUtil.EMPTY_BYTE_BUFFER, false), StandardCharsets.UTF_8);
         this.scanner = new StandardTokenizerImpl(reader);
         this.inputReader = reader;
     }
@@ -179,16 +192,28 @@ public class StandardAnalyzer extends AbstractAnalyzer
     public void reset(ByteBuffer input)
     {
         this.next = null;
-        Reader reader = new InputStreamReader(new DataInputBuffer(input, false));
+        Reader reader = new InputStreamReader(new DataInputBuffer(input, false), StandardCharsets.UTF_8);
         scanner.yyreset(reader);
         this.inputReader = reader;
     }
 
+    @VisibleForTesting
     public void reset(InputStream input)
     {
         this.next = null;
-        Reader reader = new InputStreamReader(input);
+        Reader reader = new InputStreamReader(input, StandardCharsets.UTF_8);
         scanner.yyreset(reader);
         this.inputReader = reader;
+    }
+
+    public boolean isTokenizing()
+    {
+        return true;
+    }
+
+    @Override
+    public boolean isCompatibleWith(AbstractType<?> validator)
+    {
+        return VALID_ANALYZABLE_TYPES.contains(validator);
     }
 }

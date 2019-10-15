@@ -22,8 +22,12 @@ import java.io.IOException;
 import java.io.Serializable;
 import java.util.*;
 
+import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.PeekingIterator;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import org.apache.cassandra.db.TypeSizes;
 import org.apache.cassandra.dht.IPartitioner;
@@ -58,6 +62,8 @@ import org.apache.cassandra.net.MessagingService;
  */
 public class MerkleTree implements Serializable
 {
+    private static Logger logger = LoggerFactory.getLogger(MerkleTree.class);
+
     public static final MerkleTreeSerializer serializer = new MerkleTreeSerializer();
     private static final long serialVersionUID = 2L;
 
@@ -241,8 +247,20 @@ public class MerkleTree implements Serializable
 
         if (lhash != null && rhash != null && !Arrays.equals(lhash, rhash))
         {
-            if (FULLY_INCONSISTENT == differenceHelper(ltree, rtree, diff, active))
+            if(lnode instanceof  Leaf || rnode instanceof Leaf)
+            {
+                logger.debug("Digest mismatch detected among leaf nodes {}, {}", lnode, rnode);
                 diff.add(active);
+            }
+            else
+            {
+                logger.debug("Digest mismatch detected, traversing trees [{}, {}]", ltree, rtree);
+                if (FULLY_INCONSISTENT == differenceHelper(ltree, rtree, diff, active))
+                {
+                    logger.debug("Range {} fully inconsistent", active);
+                    diff.add(active);
+                }
+            }
         }
         else if (lhash == null || rhash == null)
             diff.add(active);
@@ -256,14 +274,25 @@ public class MerkleTree implements Serializable
      * Takes two trees and a range for which they have hashes, but are inconsistent.
      * @return FULLY_INCONSISTENT if active is inconsistent, PARTIALLY_INCONSISTENT if only a subrange is inconsistent.
      */
+    @VisibleForTesting
     static int differenceHelper(MerkleTree ltree, MerkleTree rtree, List<TreeRange> diff, TreeRange active)
     {
         if (active.depth == Byte.MAX_VALUE)
             return CONSISTENT;
 
         Token midpoint = ltree.partitioner().midpoint(active.left, active.right);
+        // sanity check for midpoint calculation, see CASSANDRA-13052
+        if (midpoint.equals(active.left) || midpoint.equals(active.right))
+        {
+            // If the midpoint equals either the left or the right, we have a range that's too small to split - we'll simply report the
+            // whole range as inconsistent
+            logger.debug("({}) No sane midpoint ({}) for range {} , marking whole range as inconsistent", active.depth, midpoint, active);
+            return FULLY_INCONSISTENT;
+        }
+
         TreeDifference left = new TreeDifference(active.left, midpoint, inc(active.depth));
         TreeDifference right = new TreeDifference(midpoint, active.right, inc(active.depth));
+        logger.debug("({}) Hashing sub-ranges [{}, {}] for {} divided by midpoint {}", active.depth, left, right, active, midpoint);
         byte[] lhash, rhash;
         Hashable lnode, rnode;
 
@@ -278,9 +307,16 @@ public class MerkleTree implements Serializable
         int ldiff = CONSISTENT;
         boolean lreso = lhash != null && rhash != null;
         if (lreso && !Arrays.equals(lhash, rhash))
-            ldiff = differenceHelper(ltree, rtree, diff, left);
+        {
+            logger.debug("({}) Inconsistent digest on left sub-range {}: [{}, {}]", active.depth, left, lnode, rnode);
+            if (lnode instanceof Leaf) ldiff = FULLY_INCONSISTENT;
+            else ldiff = differenceHelper(ltree, rtree, diff, left);
+        }
         else if (!lreso)
+        {
+            logger.debug("({}) Left sub-range fully inconsistent {}", active.depth, right);
             ldiff = FULLY_INCONSISTENT;
+        }
 
         // see if we should recurse right
         lnode = ltree.find(right);
@@ -293,25 +329,36 @@ public class MerkleTree implements Serializable
         int rdiff = CONSISTENT;
         boolean rreso = lhash != null && rhash != null;
         if (rreso && !Arrays.equals(lhash, rhash))
-            rdiff = differenceHelper(ltree, rtree, diff, right);
+        {
+            logger.debug("({}) Inconsistent digest on right sub-range {}: [{}, {}]", active.depth, right, lnode, rnode);
+            if (rnode instanceof Leaf) rdiff = FULLY_INCONSISTENT;
+            else rdiff = differenceHelper(ltree, rtree, diff, right);
+        }
         else if (!rreso)
+        {
+            logger.debug("({}) Right sub-range fully inconsistent {}", active.depth, right);
             rdiff = FULLY_INCONSISTENT;
+        }
 
         if (ldiff == FULLY_INCONSISTENT && rdiff == FULLY_INCONSISTENT)
         {
             // both children are fully inconsistent
+            logger.debug("({}) Fully inconsistent range [{}, {}]", active.depth, left, right);
             return FULLY_INCONSISTENT;
         }
         else if (ldiff == FULLY_INCONSISTENT)
         {
+            logger.debug("({}) Adding left sub-range to diff as fully inconsistent {}", active.depth, left);
             diff.add(left);
             return PARTIALLY_INCONSISTENT;
         }
         else if (rdiff == FULLY_INCONSISTENT)
         {
+            logger.debug("({}) Adding right sub-range to diff as fully inconsistent {}", active.depth, right);
             diff.add(right);
             return PARTIALLY_INCONSISTENT;
         }
+        logger.debug("({}) Range {} partially inconstent", active.depth, active);
         return PARTIALLY_INCONSISTENT;
     }
 
@@ -533,6 +580,16 @@ public class MerkleTree implements Serializable
             histbuild.add(range.hashable.rowsInRange);
         }
         return histbuild.buildWithStdevRangesAroundMean();
+    }
+
+    public long rowCount()
+    {
+        long count = 0;
+        for (TreeRange range : new TreeRangeIterator(this))
+        {
+            count += range.hashable.rowsInRange;
+        }
+        return count;
     }
 
     @Override

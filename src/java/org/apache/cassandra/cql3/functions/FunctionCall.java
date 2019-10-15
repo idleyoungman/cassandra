@@ -22,13 +22,12 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.stream.Collectors;
 
-import com.google.common.collect.Iterables;
-
 import org.apache.cassandra.cql3.*;
 import org.apache.cassandra.cql3.statements.RequestValidations;
 import org.apache.cassandra.db.marshal.*;
 import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.serializers.MarshalException;
+import org.apache.cassandra.transport.ProtocolVersion;
 import org.apache.cassandra.utils.ByteBufferUtil;
 
 public class FunctionCall extends Term.NonTerminal
@@ -42,9 +41,10 @@ public class FunctionCall extends Term.NonTerminal
         this.terms = terms;
     }
 
-    public Iterable<Function> getFunctions()
+    public void addFunctionsTo(List<Function> functions)
     {
-        return Iterables.concat(Terms.getFunctions(terms), fun.getFunctions());
+        Terms.addFunctions(terms, functions);
+        fun.addFunctionsTo(functions);
     }
 
     public void collectMarkerSpecification(VariableSpecifications boundNames)
@@ -70,7 +70,7 @@ public class FunctionCall extends Term.NonTerminal
         return executeInternal(options.getProtocolVersion(), fun, buffers);
     }
 
-    private static ByteBuffer executeInternal(int protocolVersion, ScalarFunction fun, List<ByteBuffer> params) throws InvalidRequestException
+    private static ByteBuffer executeInternal(ProtocolVersion protocolVersion, ScalarFunction fun, List<ByteBuffer> params) throws InvalidRequestException
     {
         ByteBuffer result = fun.execute(protocolVersion, params);
         try
@@ -97,18 +97,28 @@ public class FunctionCall extends Term.NonTerminal
         return false;
     }
 
-    private static Term.Terminal makeTerminal(Function fun, ByteBuffer result, int version) throws InvalidRequestException
+    private static Term.Terminal makeTerminal(Function fun, ByteBuffer result, ProtocolVersion version) throws InvalidRequestException
     {
-        if (!(fun.returnType() instanceof CollectionType))
-            return new Constants.Value(result);
-
-        switch (((CollectionType)fun.returnType()).kind)
+        if (result == null)
+            return null;
+        if (fun.returnType().isCollection())
         {
-            case LIST: return Lists.Value.fromSerialized(result, (ListType)fun.returnType(), version);
-            case SET:  return Sets.Value.fromSerialized(result, (SetType)fun.returnType(), version);
-            case MAP:  return Maps.Value.fromSerialized(result, (MapType)fun.returnType(), version);
+            switch (((CollectionType) fun.returnType()).kind)
+            {
+                case LIST:
+                    return Lists.Value.fromSerialized(result, (ListType) fun.returnType(), version);
+                case SET:
+                    return Sets.Value.fromSerialized(result, (SetType) fun.returnType(), version);
+                case MAP:
+                    return Maps.Value.fromSerialized(result, (MapType) fun.returnType(), version);
+            }
         }
-        throw new AssertionError();
+        else if (fun.returnType().isUDT())
+        {
+            return UserTypes.Value.fromSerialized(result, (UserType) fun.returnType());
+        }
+
+        return new Constants.Value(result);
     }
 
     public static class Raw extends Term.Raw
@@ -180,6 +190,16 @@ public class FunctionCall extends Term.NonTerminal
             {
                 return AssignmentTestable.TestResult.WEAKLY_ASSIGNABLE;
             }
+        }
+
+        public AbstractType<?> getExactTypeIfKnown(String keyspace)
+        {
+            // We could implement this, but the method is only used in selection clause, where FunctionCall is not used 
+            // we use a Selectable.WithFunction instead). And if that method is later used in other places, better to
+            // let that future patch make sure this can be implemented properly (note in particular we don't have access
+            // to the receiver type, which FunctionResolver.get() takes) rather than provide an implementation that may
+            // not work in all cases.
+            throw new UnsupportedOperationException();
         }
 
         public String getText()

@@ -65,7 +65,7 @@ Table of Contents
   Each frame contains a fixed size header (9 bytes) followed by a variable size
   body. The header is described in Section 2. The content of the body depends
   on the header opcode value (the body can in particular be empty for some
-  opcode values). The list of allowed opcode is defined Section 2.3 and the
+  opcode values). The list of allowed opcode is defined Section 2.4 and the
   details of each corresponding message is described Section 4.
 
   The protocol distinguishes 2 types of frames: requests and responses. Requests
@@ -979,6 +979,7 @@ Table of Contents
                              - "BATCH_LOG": the timeout occured during the
                                write to the batch log when a (logged) batch
                                write was requested.
+                             - "CAS": the timeout occured during the Compare And Set write/update.
     0x1200    Read_timeout: Timeout exception during a read request. The rest
               of the ERROR message body will be
                 <cl><received><blockfor><data_present>

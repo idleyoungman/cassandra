@@ -31,12 +31,12 @@ import com.datastax.driver.core.ResultSet;
 import com.datastax.driver.core.Row;
 import org.apache.cassandra.stress.generate.PartitionGenerator;
 import org.apache.cassandra.stress.generate.SeedManager;
+import org.apache.cassandra.stress.report.Timer;
 import org.apache.cassandra.stress.settings.Command;
 import org.apache.cassandra.stress.settings.ConnectionStyle;
 import org.apache.cassandra.stress.settings.StressSettings;
 import org.apache.cassandra.stress.util.JavaDriverClient;
 import org.apache.cassandra.stress.util.ThriftClient;
-import org.apache.cassandra.stress.util.Timer;
 import org.apache.cassandra.thrift.Compression;
 import org.apache.cassandra.thrift.CqlResult;
 import org.apache.cassandra.thrift.CqlRow;
@@ -196,11 +196,14 @@ public abstract class CqlOperation<V> extends PredefinedOperation
 
         public boolean validate(ByteBuffer[][] result)
         {
-            if (result.length != expect.size())
-                return false;
-            for (int i = 0 ; i < result.length ; i++)
-                if (expect.get(i) != null && !expect.get(i).equals(Arrays.asList(result[i])))
+            if (!settings.errors.skipReadValidation)
+            {
+                if (result.length != expect.size())
                     return false;
+                for (int i = 0; i < result.length; i++)
+                    if (expect.get(i) != null && !expect.get(i).equals(Arrays.asList(result[i])))
+                        return false;
+            }
             return true;
         }
     }

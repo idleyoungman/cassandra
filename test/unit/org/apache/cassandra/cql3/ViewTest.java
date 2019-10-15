@@ -18,29 +18,17 @@
 
 package org.apache.cassandra.cql3;
 
-import java.math.BigDecimal;
-import java.math.BigInteger;
-import java.net.InetAddress;
-import java.text.SimpleDateFormat;
+import static org.junit.Assert.*;
+
 import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Date;
 import java.util.HashSet;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import com.google.common.util.concurrent.Uninterruptibles;
 
 import junit.framework.Assert;
-
-import org.apache.cassandra.concurrent.SEPExecutor;
-import org.apache.cassandra.concurrent.Stage;
-import org.apache.cassandra.concurrent.StageManager;
-import org.apache.cassandra.config.CFMetaData;
-import org.apache.cassandra.config.ColumnDefinition;
-import org.apache.cassandra.db.ColumnFamilyStore;
-import org.apache.cassandra.db.Keyspace;
-import org.apache.cassandra.db.SystemKeyspace;
-import org.apache.cassandra.utils.FBUtilities;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.BeforeClass;
@@ -49,12 +37,29 @@ import org.junit.Test;
 import com.datastax.driver.core.ResultSet;
 import com.datastax.driver.core.Row;
 import com.datastax.driver.core.exceptions.InvalidQueryException;
+import org.apache.cassandra.SchemaLoader;
+import org.apache.cassandra.concurrent.SEPExecutor;
+import org.apache.cassandra.concurrent.Stage;
+import org.apache.cassandra.concurrent.StageManager;
+import org.apache.cassandra.config.CFMetaData;
+import org.apache.cassandra.config.ColumnDefinition;
+import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.Keyspace;
+import org.apache.cassandra.db.SystemKeyspace;
+import org.apache.cassandra.db.compaction.CompactionManager;
+import org.apache.cassandra.db.marshal.AsciiType;
+import org.apache.cassandra.exceptions.InvalidRequestException;
+import org.apache.cassandra.exceptions.SyntaxException;
+import org.apache.cassandra.schema.KeyspaceParams;
+import org.apache.cassandra.transport.ProtocolVersion;
+import org.apache.cassandra.utils.FBUtilities;
 
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
 public class ViewTest extends CQLTester
 {
-    int protocolVersion = 4;
+    ProtocolVersion protocolVersion = ProtocolVersion.V4;
     private final List<String> views = new ArrayList<>();
 
     @BeforeClass
@@ -87,7 +92,7 @@ public class ViewTest extends CQLTester
     {
         executeNet(protocolVersion, query, params);
         while (!(((SEPExecutor) StageManager.getStage(Stage.VIEW_MUTATION)).getPendingTasks() == 0
-                 && ((SEPExecutor) StageManager.getStage(Stage.VIEW_MUTATION)).getActiveCount() == 0))
+                && ((SEPExecutor) StageManager.getStage(Stage.VIEW_MUTATION)).getActiveCount() == 0))
         {
             Thread.sleep(1);
         }
@@ -104,9 +109,57 @@ public class ViewTest extends CQLTester
     }
 
     @Test
+    public void testExistingRangeTombstoneWithFlush() throws Throwable
+    {
+        testExistingRangeTombstone(true);
+    }
+
+    @Test
+    public void testExistingRangeTombstoneWithoutFlush() throws Throwable
+    {
+        testExistingRangeTombstone(false);
+    }
+
+    public void testExistingRangeTombstone(boolean flush) throws Throwable
+    {
+        createTable("CREATE TABLE %s (k1 int, c1 int, c2 int, v1 int, v2 int, PRIMARY KEY (k1, c1, c2))");
+
+        execute("USE " + keyspace());
+        executeNet(protocolVersion, "USE " + keyspace());
+
+        createView("view1",
+                   "CREATE MATERIALIZED VIEW view1 AS SELECT * FROM %%s WHERE k1 IS NOT NULL AND c1 IS NOT NULL AND c2 IS NOT NULL PRIMARY KEY (k1, c2, c1)");
+
+        updateView("DELETE FROM %s USING TIMESTAMP 10 WHERE k1 = 1 and c1=1");
+
+        if (flush)
+            Keyspace.open(keyspace()).getColumnFamilyStore(currentTable()).forceBlockingFlush();
+
+        String table = KEYSPACE + "." + currentTable();
+        updateView("BEGIN BATCH " +
+                "INSERT INTO " + table + " (k1, c1, c2, v1, v2) VALUES (1, 0, 0, 0, 0) USING TIMESTAMP 5; " +
+                "INSERT INTO " + table + " (k1, c1, c2, v1, v2) VALUES (1, 0, 1, 0, 1) USING TIMESTAMP 5; " +
+                "INSERT INTO " + table + " (k1, c1, c2, v1, v2) VALUES (1, 1, 0, 1, 0) USING TIMESTAMP 5; " +
+                "INSERT INTO " + table + " (k1, c1, c2, v1, v2) VALUES (1, 1, 1, 1, 1) USING TIMESTAMP 5; " +
+                "INSERT INTO " + table + " (k1, c1, c2, v1, v2) VALUES (1, 1, 2, 1, 2) USING TIMESTAMP 5; " +
+                "INSERT INTO " + table + " (k1, c1, c2, v1, v2) VALUES (1, 1, 3, 1, 3) USING TIMESTAMP 5; " +
+                "INSERT INTO " + table + " (k1, c1, c2, v1, v2) VALUES (1, 2, 0, 2, 0) USING TIMESTAMP 5; " +
+                "APPLY BATCH");
+
+        assertRowsIgnoringOrder(execute("select * from %s"),
+                                row(1, 0, 0, 0, 0),
+                                row(1, 0, 1, 0, 1),
+                                row(1, 2, 0, 2, 0));
+        assertRowsIgnoringOrder(execute("select k1,c1,c2,v1,v2 from view1"),
+                                row(1, 0, 0, 0, 0),
+                                row(1, 0, 1, 0, 1),
+                                row(1, 2, 0, 2, 0));
+    }
+
+    @Test
     public void testPartitionTombstone() throws Throwable
     {
-        createTable("CREATE TABLE %s (k1 int, c1 int , val int, PRIMARY KEY (k1))");
+        createTable("CREATE TABLE %s (k1 int, c1 int , val int, PRIMARY KEY (k1, c1))");
 
         execute("USE " + keyspace());
         executeNet(protocolVersion, "USE " + keyspace());
@@ -116,13 +169,26 @@ public class ViewTest extends CQLTester
         updateView("INSERT INTO %s (k1, c1, val) VALUES (1, 2, 200)");
         updateView("INSERT INTO %s (k1, c1, val) VALUES (1, 3, 300)");
 
-        Assert.assertEquals(1, execute("select * from %s").size());
-        Assert.assertEquals(1, execute("select * from view1").size());
+        Assert.assertEquals(2, execute("select * from %s").size());
+        Assert.assertEquals(2, execute("select * from view1").size());
 
         updateView("DELETE FROM %s WHERE k1 = 1");
 
         Assert.assertEquals(0, execute("select * from %s").size());
         Assert.assertEquals(0, execute("select * from view1").size());
+    }
+
+
+    @Test
+    public void createMvWithUnrestrictedPKParts() throws Throwable
+    {
+        createTable("CREATE TABLE %s (k1 int, c1 int , val int, PRIMARY KEY (k1, c1))");
+
+        execute("USE " + keyspace());
+        executeNet(protocolVersion, "USE " + keyspace());
+
+        createView("view1", "CREATE MATERIALIZED VIEW view1 AS SELECT k1 FROM %%s WHERE k1 IS NOT NULL AND c1 IS NOT NULL AND val IS NOT NULL PRIMARY KEY (val, k1, c1)");
+
     }
 
     @Test
@@ -215,13 +281,31 @@ public class ViewTest extends CQLTester
         try
         {
             createView("mv_static", "CREATE MATERIALIZED VIEW %%s AS SELECT * FROM %s WHERE sval IS NOT NULL AND k IS NOT NULL AND c IS NOT NULL PRIMARY KEY (sval,k,c)");
-            Assert.fail("MV on static should fail");
+            Assert.fail("Use of static column in a MV primary key should fail");
         }
         catch (InvalidQueryException e)
         {
         }
 
-        createView("mv_static", "CREATE MATERIALIZED VIEW %s AS SELECT * FROM %%s WHERE val IS NOT NULL AND k IS NOT NULL AND c IS NOT NULL PRIMARY KEY (val,k,c)");
+        try
+        {
+            createView("mv_static", "CREATE MATERIALIZED VIEW %%s AS SELECT val, sval FROM %s WHERE val IS NOT NULL AND  k IS NOT NULL AND c IS NOT NULL PRIMARY KEY (val, k, c)");
+            Assert.fail("Explicit select of static column in MV should fail");
+        }
+        catch (InvalidQueryException e)
+        {
+        }
+
+        try
+        {
+            createView("mv_static", "CREATE MATERIALIZED VIEW %s AS SELECT * FROM %%s WHERE val IS NOT NULL AND k IS NOT NULL AND c IS NOT NULL PRIMARY KEY (val,k,c)");
+            Assert.fail("Implicit select of static column in MV should fail");
+        }
+        catch (InvalidQueryException e)
+        {
+        }
+
+        createView("mv_static", "CREATE MATERIALIZED VIEW %s AS SELECT val,k,c FROM %%s WHERE val IS NOT NULL AND k IS NOT NULL AND c IS NOT NULL PRIMARY KEY (val,k,c)");
 
         for (int i = 0; i < 100; i++)
             updateView("INSERT into %s (k,c,sval,val)VALUES(?,?,?,?)", 0, i % 2, "bar" + i, "baz");
@@ -301,7 +385,9 @@ public class ViewTest extends CQLTester
         updateView("UPDATE %s USING TIMESTAMP 2 SET val = ? WHERE k = ?", 1, 0);
         updateView("UPDATE %s USING TIMESTAMP 4 SET c = ? WHERE k = ?", 2, 0);
         updateView("UPDATE %s USING TIMESTAMP 3 SET val = ? WHERE k = ?", 2, 0);
+
         assertRows(execute("SELECT c, k, val FROM mv_rctstest"), row(2, 0, 2));
+        assertRows(execute("SELECT c, k, val FROM mv_rctstest limit 1"), row(2, 0, 2));
     }
 
     @Test
@@ -321,6 +407,50 @@ public class ViewTest extends CQLTester
         }
         catch (InvalidQueryException e)
         {
+        }
+    }
+
+    @Test
+    public void testSuperCoumn() throws Throwable
+    {
+        String keyspace = createKeyspaceName();
+        String table = createTableName();
+        SchemaLoader.createKeyspace(keyspace,
+                                    KeyspaceParams.simple(1),
+                                    SchemaLoader.superCFMD(keyspace, table, AsciiType.instance, AsciiType.instance));
+
+        execute("USE " + keyspace);
+        executeNet(protocolVersion, "USE " + keyspace);
+
+        try
+        {
+            createView("mv_super_column", "CREATE MATERIALIZED VIEW %s AS SELECT * FROM " + keyspace + "." + table + " WHERE key IS NOT NULL AND column1 IS NOT NULL PRIMARY KEY (key,column1)");
+            Assert.fail("MV on SuperColumn table should fail");
+        }
+        catch (InvalidQueryException e)
+        {
+            assertEquals("Materialized views are not supported on SuperColumn tables", e.getMessage());
+        }
+    }
+
+    @Test
+    public void testDurationsTable() throws Throwable
+    {
+        createTable("CREATE TABLE %s (" +
+                    "k int PRIMARY KEY, " +
+                    "result duration)");
+
+        execute("USE " + keyspace());
+        executeNet(protocolVersion, "USE " + keyspace());
+
+        try
+        {
+            createView("mv_duration", "CREATE MATERIALIZED VIEW %s AS SELECT * FROM %%s WHERE result IS NOT NULL AND k IS NOT NULL PRIMARY KEY (result,k)");
+            Assert.fail("MV on duration should fail");
+        }
+        catch (InvalidQueryException e)
+        {
+            Assert.assertEquals("Cannot use Duration column 'result' in PRIMARY KEY of materialized view", e.getMessage());
         }
     }
 
@@ -361,8 +491,10 @@ public class ViewTest extends CQLTester
         if (flush)
             FBUtilities.waitOnFutures(ks.flush());
 
-            //change c's value and TS=3, tombstones c=1 and adds c=0 record
+        // change c's value and TS=3, tombstones c=1 and adds c=0 record
         executeNet(protocolVersion, "UPDATE %s USING TIMESTAMP 3 SET c = ? WHERE a = ? and b = ? ", 0, 0, 0);
+        if (flush)
+            FBUtilities.waitOnFutures(ks.flush());
         assertRows(execute("SELECT d from mv WHERE c = ? and a = ? and b = ?", 1, 0, 0));
 
         if(flush)
@@ -383,7 +515,7 @@ public class ViewTest extends CQLTester
         assertRows(execute("SELECT d,e from mv WHERE c = ? and a = ? and b = ?", 1, 0, 0), row(0, null));
 
 
-            //Add e value @ TS=1
+        //Add e value @ TS=1
         executeNet(protocolVersion, "UPDATE %s USING TIMESTAMP 1 SET e = ? WHERE a = ? and b = ? ", 1, 0, 0);
         assertRows(execute("SELECT d,e from mv WHERE c = ? and a = ? and b = ?", 1, 0, 0), row(0, 1));
 
@@ -728,6 +860,39 @@ public class ViewTest extends CQLTester
     }
 
     @Test
+    public void testFrozenCollectionsWithComplicatedInnerType() throws Throwable
+    {
+        createTable("CREATE TABLE %s (k int, intval int,  listval frozen<list<tuple<text,text>>>, PRIMARY KEY (k))");
+
+        execute("USE " + keyspace());
+        executeNet(protocolVersion, "USE " + keyspace());
+
+        createView("mv",
+                   "CREATE MATERIALIZED VIEW %s AS SELECT * FROM %%s WHERE k IS NOT NULL AND listval IS NOT NULL PRIMARY KEY (k, listval)");
+
+        updateView("INSERT INTO %s (k, intval, listval) VALUES (?, ?, fromJson(?))",
+                   0,
+                   0,
+                   "[[\"a\",\"1\"], [\"b\",\"2\"], [\"c\",\"3\"]]");
+
+        // verify input
+        assertRows(execute("SELECT k, listval FROM %s WHERE k = ?", 0),
+                   row(0, list(tuple("a", "1"), tuple("b", "2"), tuple("c", "3"))));
+        assertRows(execute("SELECT k, listval from mv"),
+                   row(0, list(tuple("a", "1"), tuple("b", "2"), tuple("c", "3"))));
+
+        // update listval with the same value and it will be compared in view generator
+        updateView("INSERT INTO %s (k, listval) VALUES (?, fromJson(?))",
+                   0,
+                   "[[\"a\",\"1\"], [\"b\",\"2\"], [\"c\",\"3\"]]");
+        // verify result
+        assertRows(execute("SELECT k, listval FROM %s WHERE k = ?", 0),
+                   row(0, list(tuple("a", "1"), tuple("b", "2"), tuple("c", "3"))));
+        assertRows(execute("SELECT k, listval from mv"),
+                   row(0, list(tuple("a", "1"), tuple("b", "2"), tuple("c", "3"))));
+    }
+
+    @Test
     public void testUpdate() throws Throwable
     {
         createTable("CREATE TABLE %s (" +
@@ -778,12 +943,12 @@ public class ViewTest extends CQLTester
         String table = KEYSPACE + "." + currentTable();
         updateView("BEGIN BATCH " +
                 "INSERT INTO " + table + " (a, b, c, d) VALUES (?, ?, ?, ?); " + // should be accepted
-                "UPDATE " + table + " SET d = ? WHERE a = ? AND b = ?; " +  // should be ignored
+                "UPDATE " + table + " SET d = ? WHERE a = ? AND b = ?; " +  // should be accepted
                 "APPLY BATCH",
                 0, 0, 0, 0,
                 1, 0, 1);
         assertRows(execute("SELECT a, b, c from mv WHERE b = ?", 0), row(0, 0, 0));
-        assertEmpty(execute("SELECT a, b, c from mv WHERE b = ?", 1));
+        assertRows(execute("SELECT a, b, c from mv WHERE b = ?", 1), row(0, 1, null));
 
         ColumnFamilyStore cfs = Keyspace.open(keyspace()).getColumnFamilyStore("mv");
         cfs.forceBlockingFlush();
@@ -804,15 +969,55 @@ public class ViewTest extends CQLTester
 
         createView("mv", "CREATE MATERIALIZED VIEW %s AS SELECT * FROM %%s WHERE c IS NOT NULL AND a IS NOT NULL AND b IS NOT NULL PRIMARY KEY (c, a, b)");
 
-        updateView("INSERT INTO %s (a, b, c, d) VALUES (?, ?, ?, ?) USING TTL 5", 1, 1, 1, 1);
+        updateView("INSERT INTO %s (a, b, c, d) VALUES (?, ?, ?, ?) USING TTL 3", 1, 1, 1, 1);
 
-        Thread.sleep(TimeUnit.SECONDS.toMillis(3));
+        Thread.sleep(TimeUnit.SECONDS.toMillis(1));
         updateView("INSERT INTO %s (a, b, c) VALUES (?, ?, ?)", 1, 1, 2);
 
-        Thread.sleep(TimeUnit.SECONDS.toMillis(3));
+        Thread.sleep(TimeUnit.SECONDS.toMillis(5));
         List<Row> results = executeNet(protocolVersion, "SELECT d FROM mv WHERE c = 2 AND a = 1 AND b = 1").all();
         Assert.assertEquals(1, results.size());
         Assert.assertTrue("There should be a null result given back due to ttl expiry", results.get(0).isNull(0));
+    }
+
+    @Test
+    public void ttlExpirationTest() throws Throwable
+    {
+        createTable("CREATE TABLE %s (" +
+                    "a int," +
+                    "b int," +
+                    "c int," +
+                    "d int," +
+                    "PRIMARY KEY (a, b))");
+
+        executeNet(protocolVersion, "USE " + keyspace());
+
+        createView("mv", "CREATE MATERIALIZED VIEW %s AS SELECT * FROM %%s WHERE c IS NOT NULL AND a IS NOT NULL AND b IS NOT NULL PRIMARY KEY (c, a, b)");
+
+        updateView("INSERT INTO %s (a, b, c, d) VALUES (?, ?, ?, ?) USING TTL 3", 1, 1, 1, 1);
+
+        Thread.sleep(TimeUnit.SECONDS.toMillis(4));
+        Assert.assertEquals(0, executeNet(protocolVersion, "SELECT * FROM mv WHERE c = 1 AND a = 1 AND b = 1").all().size());
+    }
+
+    @Test
+    public void rowDeletionTest() throws Throwable
+    {
+        createTable("CREATE TABLE %s (" +
+                    "a int," +
+                    "b int," +
+                    "c int," +
+                    "d int," +
+                    "PRIMARY KEY (a, b))");
+
+        executeNet(protocolVersion, "USE " + keyspace());
+
+        createView("mv", "CREATE MATERIALIZED VIEW %s AS SELECT * FROM %%s WHERE c IS NOT NULL AND a IS NOT NULL AND b IS NOT NULL PRIMARY KEY (c, a, b)");
+
+        String table = keyspace() + "." + currentTable();
+        updateView("DELETE FROM " + table + " USING TIMESTAMP 6 WHERE a = 1 AND b = 1;");
+        updateView("INSERT INTO %s (a, b, c, d) VALUES (?, ?, ?, ?) USING TIMESTAMP 3", 1, 1, 1, 1);
+        Assert.assertEquals(0, executeNet(protocolVersion, "SELECT * FROM mv WHERE c = 1 AND a = 1 AND b = 1").all().size());
     }
 
     @Test
@@ -905,9 +1110,9 @@ public class ViewTest extends CQLTester
                       row(1, 3));
 
         updateView(String.format("BEGIN UNLOGGED BATCH " +
-                   "DELETE FROM %s WHERE a = 1 AND b > 1 AND b < 3;" +
-                   "DELETE FROM %s WHERE a = 1;" +
-                   "APPLY BATCH", currentTable(), currentTable()));
+                                 "DELETE FROM %s WHERE a = 1 AND b > 1 AND b < 3;" +
+                                 "DELETE FROM %s WHERE a = 1;" +
+                                 "APPLY BATCH", currentTable(), currentTable()));
 
         mvRows = executeNet(protocolVersion, "SELECT a, b FROM mv1");
         assertRowsNet(protocolVersion, mvRows);
@@ -1002,4 +1207,218 @@ public class ViewTest extends CQLTester
         mvRows = executeNet(protocolVersion, "SELECT a, d, b FROM mv1");
         assertTrue(mvRows.isExhausted());
     }
+
+    @Test
+    public void testCollectionInView() throws Throwable
+    {
+        createTable("CREATE TABLE %s (" +
+                    "a int," +
+                    "b int," +
+                    "c map<int, text>," +
+                    "PRIMARY KEY (a))");
+
+        executeNet(protocolVersion, "USE " + keyspace());
+        createView("mvmap", "CREATE MATERIALIZED VIEW %s AS SELECT a, b FROM %%s WHERE b IS NOT NULL PRIMARY KEY (b, a)");
+
+        updateView("INSERT INTO %s (a, b) VALUES (?, ?)", 0, 0);
+        ResultSet mvRows = executeNet(protocolVersion, "SELECT a, b FROM mvmap WHERE b = ?", 0);
+        assertRowsNet(protocolVersion, mvRows, row(0, 0));
+
+        updateView("INSERT INTO %s (a, b, c) VALUES (?, ?, ?)", 1, 1, map(1, "1"));
+        mvRows = executeNet(protocolVersion, "SELECT a, b FROM mvmap WHERE b = ?", 1);
+        assertRowsNet(protocolVersion, mvRows, row(1, 1));
+
+        updateView("INSERT INTO %s (a, b, c) VALUES (?, ?, ?)", 0, 0, map(0, "0"));
+        mvRows = executeNet(protocolVersion, "SELECT a, b FROM mvmap WHERE b = ?", 0);
+        assertRowsNet(protocolVersion, mvRows, row(0, 0));
+    }
+
+    @Test
+    public void testMultipleNonPrimaryKeysInView() throws Throwable
+    {
+        createTable("CREATE TABLE %s (" +
+                    "a int," +
+                    "b int," +
+                    "c int," +
+                    "d int," +
+                    "e int," +
+                    "PRIMARY KEY ((a, b), c))");
+
+        try
+        {
+            createView("mv_de", "CREATE MATERIALIZED VIEW %s AS SELECT * FROM %%s WHERE a IS NOT NULL AND b IS NOT NULL AND c IS NOT NULL AND d IS NOT NULL AND e IS NOT NULL PRIMARY KEY ((d, a), b, e, c)");
+            Assert.fail("Should have rejected a query including multiple non-primary key base columns");
+        }
+        catch (Exception e)
+        {
+        }
+
+        try
+        {
+            createView("mv_de", "CREATE MATERIALIZED VIEW %s AS SELECT * FROM %%s WHERE a IS NOT NULL AND b IS NOT NULL AND c IS NOT NULL AND d IS NOT NULL AND e IS NOT NULL PRIMARY KEY ((a, b), c, d, e)");
+            Assert.fail("Should have rejected a query including multiple non-primary key base columns");
+        }
+        catch (Exception e)
+        {
+        }
+    }
+
+    @Test
+    public void testNullInClusteringColumns() throws Throwable
+    {
+        createTable("CREATE TABLE %s (id1 int, id2 int, v1 text, v2 text, PRIMARY KEY (id1, id2))");
+
+        executeNet(protocolVersion, "USE " + keyspace());
+
+        createView("mv",
+                   "CREATE MATERIALIZED VIEW %s AS" +
+                   "  SELECT id1, v1, id2, v2" +
+                   "  FROM %%s" +
+                   "  WHERE id1 IS NOT NULL AND v1 IS NOT NULL AND id2 IS NOT NULL" +
+                   "  PRIMARY KEY (id1, v1, id2)" +
+                   "  WITH CLUSTERING ORDER BY (v1 DESC, id2 ASC)");
+
+        execute("INSERT INTO %s (id1, id2, v1, v2) VALUES (?, ?, ?, ?)", 0, 1, "foo", "bar");
+
+        assertRowsNet(protocolVersion, executeNet(protocolVersion, "SELECT * FROM %s"), row(0, 1, "foo", "bar"));
+        assertRowsNet(protocolVersion, executeNet(protocolVersion, "SELECT * FROM mv"), row(0, "foo", 1, "bar"));
+
+        executeNet(protocolVersion, "UPDATE %s SET v1=? WHERE id1=? AND id2=?", null, 0, 1);
+        assertRowsNet(protocolVersion, executeNet(protocolVersion, "SELECT * FROM %s"), row(0, 1, null, "bar"));
+        assertRowsNet(protocolVersion, executeNet(protocolVersion, "SELECT * FROM mv"));
+
+        executeNet(protocolVersion, "UPDATE %s SET v2=? WHERE id1=? AND id2=?", "rab", 0, 1);
+        assertRowsNet(protocolVersion, executeNet(protocolVersion, "SELECT * FROM %s"), row(0, 1, null, "rab"));
+        assertRowsNet(protocolVersion, executeNet(protocolVersion, "SELECT * FROM mv"));
+    }
+
+    @Test
+    public void testReservedKeywordsInMV() throws Throwable
+    {
+        createTable("CREATE TABLE %s (\"token\" int PRIMARY KEY, \"keyspace\" int)");
+
+        executeNet(protocolVersion, "USE " + keyspace());
+
+        createView("mv",
+                   "CREATE MATERIALIZED VIEW %s AS" +
+                   "  SELECT \"keyspace\", \"token\"" +
+                   "  FROM %%s" +
+                   "  WHERE \"keyspace\" IS NOT NULL AND \"token\" IS NOT NULL" +
+                   "  PRIMARY KEY (\"keyspace\", \"token\")");
+
+        execute("INSERT INTO %s (\"token\", \"keyspace\") VALUES (?, ?)", 0, 1);
+
+        assertRowsNet(protocolVersion, executeNet(protocolVersion, "SELECT * FROM %s"), row(0, 1));
+        assertRowsNet(protocolVersion, executeNet(protocolVersion, "SELECT * FROM mv"), row(1, 0));
+    }
+
+    public void testCreateMvWithTTL() throws Throwable
+    {
+        createTable("CREATE TABLE %s (" +
+                "k int PRIMARY KEY, " +
+                "c int, " +
+                "val int) WITH default_time_to_live = 60");
+
+        execute("USE " + keyspace());
+        executeNet(protocolVersion, "USE " + keyspace());
+
+        // Must NOT include "default_time_to_live" for Materialized View creation
+        try
+        {
+            createView("mv_ttl1", "CREATE MATERIALIZED VIEW %s AS SELECT * FROM %%s WHERE k IS NOT NULL AND c IS NOT NULL PRIMARY KEY (k,c) WITH default_time_to_live = 30");
+            Assert.fail("Should fail if TTL is provided for materialized view");
+        }
+        catch (Exception e)
+        {
+        }
+    }
+
+    @Test
+    public void testAlterMvWithTTL() throws Throwable
+    {
+        createTable("CREATE TABLE %s (" +
+                    "k int PRIMARY KEY, " +
+                    "c int, " +
+                    "val int) WITH default_time_to_live = 60");
+
+        createView("mv_ttl2", "CREATE MATERIALIZED VIEW %s AS SELECT * FROM %%s WHERE k IS NOT NULL AND c IS NOT NULL PRIMARY KEY (k,c)");
+
+        // Must NOT include "default_time_to_live" on alter Materialized View
+        try
+        {
+            executeNet(protocolVersion, "ALTER MATERIALIZED VIEW %s WITH default_time_to_live = 30");
+            Assert.fail("Should fail if TTL is provided while altering materialized view");
+        }
+        catch (Exception e)
+        {
+        }
+    }
+
+    @Test
+    public void testViewBuilderResume() throws Throwable
+    {
+        createTable("CREATE TABLE %s (" +
+                    "k int, " +
+                    "c int, " +
+                    "val text, " +
+                    "PRIMARY KEY(k,c))");
+
+        execute("USE " + keyspace());
+        executeNet(protocolVersion, "USE " + keyspace());
+
+        CompactionManager.instance.setCoreCompactorThreads(1);
+        CompactionManager.instance.setMaximumCompactorThreads(1);
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        cfs.disableAutoCompaction();
+
+        for (int i = 0; i < 1024; i++)
+            execute("INSERT into %s (k,c,val)VALUES(?,?,?)", i, i, ""+i);
+
+        cfs.forceBlockingFlush();
+
+        for (int i = 0; i < 1024; i++)
+            execute("INSERT into %s (k,c,val)VALUES(?,?,?)", i, i, ""+i);
+
+        cfs.forceBlockingFlush();
+
+        for (int i = 0; i < 1024; i++)
+            execute("INSERT into %s (k,c,val)VALUES(?,?,?)", i, i, ""+i);
+
+        cfs.forceBlockingFlush();
+
+        for (int i = 0; i < 1024; i++)
+            execute("INSERT into %s (k,c,val)VALUES(?,?,?)", i, i, ""+i);
+
+        cfs.forceBlockingFlush();
+
+        createView("mv_test", "CREATE MATERIALIZED VIEW %s AS SELECT * FROM %%s WHERE val IS NOT NULL AND k IS NOT NULL AND c IS NOT NULL PRIMARY KEY (val,k,c)");
+
+        cfs.enableAutoCompaction();
+        List<Future<?>> futures = CompactionManager.instance.submitBackground(cfs);
+
+        //Force a second MV on the same base table, which will restart the first MV builder...
+        createView("mv_test2", "CREATE MATERIALIZED VIEW %s AS SELECT val, k, c FROM %%s WHERE val IS NOT NULL AND k IS NOT NULL AND c IS NOT NULL PRIMARY KEY (val,k,c)");
+
+
+        //Compact the base table
+        FBUtilities.waitOnFutures(futures);
+
+        while (!SystemKeyspace.isViewBuilt(keyspace(), "mv_test"))
+            Uninterruptibles.sleepUninterruptibly(1, TimeUnit.SECONDS);
+
+        assertRows(execute("SELECT count(*) FROM mv_test"), row(1024L));
+    }
+
+
+    @Test(expected = SyntaxException.class)
+    public void emptyViewNameTest() throws Throwable
+    {
+        execute("CREATE MATERIALIZED VIEW \"\" AS SELECT a, b FROM tbl WHERE b IS NOT NULL PRIMARY KEY (b, a)");
+    }
+
+     @Test(expected = SyntaxException.class)
+     public void emptyBaseTableNameTest() throws Throwable
+     {
+         execute("CREATE MATERIALIZED VIEW myview AS SELECT a, b FROM \"\" WHERE b IS NOT NULL PRIMARY KEY (b, a)");
+     }
 }

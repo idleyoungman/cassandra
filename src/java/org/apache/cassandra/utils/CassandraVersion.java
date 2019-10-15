@@ -118,6 +118,11 @@ public class CassandraVersion implements Comparable<CassandraVersion>
         return compareIdentifiers(build, other.build, -1);
     }
 
+    public boolean is30()
+    {
+        return major == 3 && minor == 0;
+    }
+
     /**
      * Returns a version that is backward compatible with this version amongst a list
      * of provided version, or null if none can be found.
@@ -142,7 +147,7 @@ public class CassandraVersion implements Comparable<CassandraVersion>
 
     public boolean isSupportedBy(CassandraVersion version)
     {
-        return major == version.major && this.compareTo(version) <= 0;
+        return version != null && major == version.major && this.compareTo(version) <= 0;
     }
 
     private static int compareIdentifiers(String[] ids1, String[] ids2, int defaultPred)

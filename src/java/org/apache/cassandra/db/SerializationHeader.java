@@ -22,14 +22,11 @@ import java.nio.ByteBuffer;
 import java.util.*;
 
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.Lists;
-
 import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.config.ColumnDefinition;
 import org.apache.cassandra.db.filter.ColumnFilter;
 import org.apache.cassandra.db.rows.*;
 import org.apache.cassandra.db.marshal.AbstractType;
-import org.apache.cassandra.db.marshal.BytesType;
 import org.apache.cassandra.db.marshal.UTF8Type;
 import org.apache.cassandra.db.marshal.TypeParser;
 import org.apache.cassandra.io.sstable.format.SSTableReader;
@@ -70,23 +67,9 @@ public class SerializationHeader
         this.typeMap = typeMap;
     }
 
-    public static SerializationHeader forKeyCache(CFMetaData metadata)
+    public static SerializationHeader makeWithoutStats(CFMetaData metadata)
     {
-        // We don't save type information in the key cache (we could change
-        // that but it's easier right now), so instead we simply use BytesType
-        // for both serialization and deserialization. Note that we also only
-        // serializer clustering prefixes in the key cache, so only the clusteringTypes
-        // really matter.
-        int size = metadata.clusteringColumns().size();
-        List<AbstractType<?>> clusteringTypes = new ArrayList<>(size);
-        for (int i = 0; i < size; i++)
-            clusteringTypes.add(BytesType.instance);
-        return new SerializationHeader(false,
-                                       BytesType.instance,
-                                       clusteringTypes,
-                                       PartitionColumns.NONE,
-                                       EncodingStats.NO_STATS,
-                                       Collections.<ByteBuffer, AbstractType<?>>emptyMap());
+        return new SerializationHeader(true, metadata, metadata.partitionColumns(), EncodingStats.NO_STATS);
     }
 
     public static SerializationHeader make(CFMetaData metadata, Collection<SSTableReader> sstables)
@@ -103,7 +86,8 @@ public class SerializationHeader
         // but rather on their stats stored in StatsMetadata that are fully accurate.
         EncodingStats.Collector stats = new EncodingStats.Collector();
         PartitionColumns.Builder columns = PartitionColumns.builder();
-        for (SSTableReader sstable : sstables)
+        // We need to order the SSTables by descending generation to be sure that we use latest column definitions.
+        for (SSTableReader sstable : orderByDescendingGeneration(sstables))
         {
             stats.updateTimestamp(sstable.getMinTimestamp());
             stats.updateLocalDeletionTime(sstable.getMinLocalDeletionTime());
@@ -116,6 +100,16 @@ public class SerializationHeader
         return new SerializationHeader(true, metadata, columns.build(), stats.get());
     }
 
+    private static Collection<SSTableReader> orderByDescendingGeneration(Collection<SSTableReader> sstables)
+    {
+        if (sstables.size() < 2)
+            return sstables;
+
+        List<SSTableReader> readers = new ArrayList<>(sstables);
+        readers.sort(SSTableReader.generationReverseComparator);
+        return readers;
+    }
+
     public SerializationHeader(boolean isForSSTable,
                                CFMetaData metadata,
                                PartitionColumns columns,
@@ -123,15 +117,10 @@ public class SerializationHeader
     {
         this(isForSSTable,
              metadata.getKeyValidator(),
-             typesOf(metadata.clusteringColumns()),
+             metadata.comparator.subtypes(),
              columns,
              stats,
              null);
-    }
-
-    private static List<AbstractType<?>> typesOf(List<ColumnDefinition> columns)
-    {
-        return ImmutableList.copyOf(Lists.transform(columns, column -> column.type));
     }
 
     public PartitionColumns columns()
@@ -309,29 +298,37 @@ public class SerializationHeader
         public SerializationHeader toHeader(CFMetaData metadata)
         {
             Map<ByteBuffer, AbstractType<?>> typeMap = new HashMap<>(staticColumns.size() + regularColumns.size());
-            typeMap.putAll(staticColumns);
-            typeMap.putAll(regularColumns);
 
             PartitionColumns.Builder builder = PartitionColumns.builder();
-            for (ByteBuffer name : typeMap.keySet())
+            for (Map<ByteBuffer, AbstractType<?>> map : ImmutableList.of(staticColumns, regularColumns))
             {
-                ColumnDefinition column = metadata.getColumnDefinition(name);
-                if (column == null)
+                boolean isStatic = map == staticColumns;
+                for (Map.Entry<ByteBuffer, AbstractType<?>> e : map.entrySet())
                 {
-                    // TODO: this imply we don't read data for a column we don't yet know about, which imply this is theoretically
-                    // racy with column addition. Currently, it is up to the user to not write data before the schema has propagated
-                    // and this is far from being the only place that has such problem in practice. This doesn't mean we shouldn't
-                    // improve this.
+                    ByteBuffer name = e.getKey();
+                    AbstractType<?> other = typeMap.put(name, e.getValue());
+                    if (other != null && !other.equals(e.getValue()))
+                        throw new IllegalStateException("Column " + name + " occurs as both regular and static with types " + other + "and " + e.getValue());
 
-                    // If we don't find the definition, it could be we have data for a dropped column, and we shouldn't
-                    // fail deserialization because of that. So we grab a "fake" ColumnDefinition that ensure proper
-                    // deserialization. The column will be ignore later on anyway.
-                    column = metadata.getDroppedColumnDefinition(name);
-                    if (column == null)
-                        throw new RuntimeException("Unknown column " + UTF8Type.instance.getString(name) + " during deserialization");
+                    ColumnDefinition column = metadata.getColumnDefinition(name);
+                    if (column == null || column.isStatic() != isStatic)
+                    {
+                        // TODO: this imply we don't read data for a column we don't yet know about, which imply this is theoretically
+                        // racy with column addition. Currently, it is up to the user to not write data before the schema has propagated
+                        // and this is far from being the only place that has such problem in practice. This doesn't mean we shouldn't
+                        // improve this.
+
+                        // If we don't find the definition, it could be we have data for a dropped column, and we shouldn't
+                        // fail deserialization because of that. So we grab a "fake" ColumnDefinition that ensure proper
+                        // deserialization. The column will be ignore later on anyway.
+                        column = metadata.getDroppedColumnDefinition(name, isStatic);
+                        if (column == null)
+                            throw new RuntimeException("Unknown column " + UTF8Type.instance.getString(name) + " during deserialization");
+                    }
+                    builder.add(column);
                 }
-                builder.add(column);
             }
+
             return new SerializationHeader(true, keyType, clusteringTypes, builder.build(), stats, typeMap);
         }
 
@@ -362,7 +359,7 @@ public class SerializationHeader
                                  keyType, clusteringTypes, staticColumns, regularColumns, stats);
         }
 
-        public AbstractType<?> getKetType()
+        public AbstractType<?> getKeyType()
         {
             return keyType;
         }
@@ -413,7 +410,7 @@ public class SerializationHeader
             EncodingStats stats = EncodingStats.serializer.deserialize(in);
 
             AbstractType<?> keyType = metadata.getKeyValidator();
-            List<AbstractType<?>> clusteringTypes = typesOf(metadata.clusteringColumns());
+            List<AbstractType<?>> clusteringTypes = metadata.comparator.subtypes();
 
             Columns statics, regulars;
             if (selection == null)

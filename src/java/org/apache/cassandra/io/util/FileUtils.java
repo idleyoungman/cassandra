@@ -24,42 +24,46 @@ import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.nio.file.attribute.BasicFileAttributes;
+import java.nio.file.attribute.FileAttributeView;
+import java.nio.file.attribute.FileStoreAttributeView;
 import java.text.DecimalFormat;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
-
-import sun.nio.ch.DirectBuffer;
+import java.util.Optional;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
+import java.util.function.Predicate;
+import java.util.stream.StreamSupport;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import sun.nio.ch.DirectBuffer;
 
 import org.apache.cassandra.concurrent.ScheduledExecutors;
-import org.apache.cassandra.config.DatabaseDescriptor;
-import org.apache.cassandra.db.BlacklistedDirectories;
-import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.io.FSError;
+import org.apache.cassandra.io.FSErrorHandler;
 import org.apache.cassandra.io.FSReadError;
 import org.apache.cassandra.io.FSWriteError;
 import org.apache.cassandra.io.sstable.CorruptSSTableException;
-import org.apache.cassandra.service.StorageService;
 import org.apache.cassandra.utils.JVMStabilityInspector;
 
 import static org.apache.cassandra.utils.Throwables.maybeFail;
 import static org.apache.cassandra.utils.Throwables.merge;
 
-public class FileUtils
+public final class FileUtils
 {
     public static final Charset CHARSET = StandardCharsets.UTF_8;
 
     private static final Logger logger = LoggerFactory.getLogger(FileUtils.class);
-    private static final double KB = 1024d;
-    private static final double MB = 1024*1024d;
-    private static final double GB = 1024*1024*1024d;
-    private static final double TB = 1024*1024*1024*1024d;
+    public static final long ONE_KB = 1024;
+    public static final long ONE_MB = 1024 * ONE_KB;
+    public static final long ONE_GB = 1024 * ONE_MB;
+    public static final long ONE_TB = 1024 * ONE_GB;
 
     private static final DecimalFormat df = new DecimalFormat("#.##");
-    private static final boolean canCleanDirectBuffers;
+    public static final boolean isCleanerAvailable;
+    private static final AtomicReference<Optional<FSErrorHandler>> fsErrorHandler = new AtomicReference<>(Optional.empty());
 
     static
     {
@@ -75,7 +79,7 @@ public class FileUtils
             JVMStabilityInspector.inspectThrowable(t);
             logger.info("Cannot initialize un-mmaper.  (Are you using a non-Oracle JVM?)  Compacted data files will not be removed promptly.  Consider using an Oracle JVM or using standard disk access mode");
         }
-        canCleanDirectBuffers = canClean;
+        isCleanerAvailable = canClean;
     }
 
     public static void createHardLink(String from, String to)
@@ -177,7 +181,7 @@ public class FileUtils
     {
         assert from.exists();
         if (logger.isTraceEnabled())
-            logger.trace((String.format("Renaming %s to %s", from.getPath(), to.getPath())));
+            logger.trace("Renaming {} to {}", from.getPath(), to.getPath());
         // this is not FSWE because usually when we see it it's because we didn't close the file before renaming it,
         // and Windows is picky about that.
         try
@@ -335,16 +339,11 @@ public class FileUtils
         }
     }
 
-    public static boolean isCleanerAvailable()
-    {
-        return canCleanDirectBuffers;
-    }
-
     public static void clean(ByteBuffer buffer)
     {
         if (buffer == null)
             return;
-        if (isCleanerAvailable() && buffer.isDirect())
+        if (isCleanerAvailable && buffer.isDirect())
         {
             DirectBuffer db = (DirectBuffer) buffer;
             if (db.cleaner() != null)
@@ -374,6 +373,13 @@ public class FileUtils
 
     public static void delete(File... files)
     {
+        if (files == null)
+        {
+            // CASSANDRA-13389: some callers use Files.listFiles() which, on error, silently returns null
+            logger.debug("Received null list of files to delete");
+            return;
+        }
+
         for ( File file : files )
         {
             file.delete();
@@ -392,32 +398,48 @@ public class FileUtils
         ScheduledExecutors.nonPeriodicTasks.execute(runnable);
     }
 
+    public static void visitDirectory(Path dir, Predicate<? super File> filter, Consumer<? super File> consumer)
+    {
+        try (DirectoryStream<Path> stream = Files.newDirectoryStream(dir))
+        {
+            StreamSupport.stream(stream.spliterator(), false)
+                         .map(Path::toFile)
+                         // stream directories are weakly consistent so we always check if the file still exists
+                         .filter(f -> f.exists() && (filter == null || filter.test(f)))
+                         .forEach(consumer);
+        }
+        catch (IOException|DirectoryIteratorException ex)
+        {
+            logger.error("Failed to list files in {} with exception: {}", dir, ex.getMessage(), ex);
+        }
+    }
+
     public static String stringifyFileSize(double value)
     {
         double d;
-        if ( value >= TB )
+        if ( value >= ONE_TB )
         {
-            d = value / TB;
+            d = value / ONE_TB;
             String val = df.format(d);
-            return val + " TB";
+            return val + " TiB";
         }
-        else if ( value >= GB )
+        else if ( value >= ONE_GB )
         {
-            d = value / GB;
+            d = value / ONE_GB;
             String val = df.format(d);
-            return val + " GB";
+            return val + " GiB";
         }
-        else if ( value >= MB )
+        else if ( value >= ONE_MB )
         {
-            d = value / MB;
+            d = value / ONE_MB;
             String val = df.format(d);
-            return val + " MB";
+            return val + " MiB";
         }
-        else if ( value >= KB )
+        else if ( value >= ONE_KB )
         {
-            d = value / KB;
+            d = value / ONE_KB;
             String val = df.format(d);
-            return val + " KB";
+            return val + " KiB";
         }
         else
         {
@@ -457,69 +479,18 @@ public class FileUtils
                 deleteRecursiveOnExit(new File(dir, child));
         }
 
-        logger.trace("Scheduling deferred deletion of file: " + dir);
+        logger.trace("Scheduling deferred deletion of file: {}", dir);
         dir.deleteOnExit();
     }
 
     public static void handleCorruptSSTable(CorruptSSTableException e)
     {
-        if (!StorageService.instance.isSetupCompleted())
-            handleStartupFSError(e);
-
-        JVMStabilityInspector.inspectThrowable(e);
-        switch (DatabaseDescriptor.getDiskFailurePolicy())
-        {
-            case stop_paranoid:
-                StorageService.instance.stopTransports();
-                break;
-        }
+        fsErrorHandler.get().ifPresent(handler -> handler.handleCorruptSSTable(e));
     }
-    
+
     public static void handleFSError(FSError e)
     {
-        if (!StorageService.instance.isSetupCompleted())
-            handleStartupFSError(e);
-
-        JVMStabilityInspector.inspectThrowable(e);
-        switch (DatabaseDescriptor.getDiskFailurePolicy())
-        {
-            case stop_paranoid:
-            case stop:
-                StorageService.instance.stopTransports();
-                break;
-            case best_effort:
-                // for both read and write errors mark the path as unwritable.
-                BlacklistedDirectories.maybeMarkUnwritable(e.path);
-                if (e instanceof FSReadError)
-                {
-                    File directory = BlacklistedDirectories.maybeMarkUnreadable(e.path);
-                    if (directory != null)
-                        Keyspace.removeUnreadableSSTables(directory);
-                }
-                break;
-            case ignore:
-                // already logged, so left nothing to do
-                break;
-            default:
-                throw new IllegalStateException();
-        }
-    }
-
-    private static void handleStartupFSError(Throwable t)
-    {
-        switch (DatabaseDescriptor.getDiskFailurePolicy())
-        {
-            case stop_paranoid:
-            case stop:
-            case die:
-                logger.error("Exiting forcefully due to file system exception on startup, disk failure policy \"{}\"",
-                             DatabaseDescriptor.getDiskFailurePolicy(),
-                             t);
-                JVMStabilityInspector.killCurrentJVM(t, true);
-                break;
-            default:
-                break;
-        }
+        fsErrorHandler.get().ifPresent(handler -> handler.handleFSError(e));
     }
 
     /**
@@ -632,6 +603,166 @@ public class FileUtils
                 return Collections.emptyList();
 
             throw new RuntimeException(ex);
+        }
+    }
+
+    public static void setFSErrorHandler(FSErrorHandler handler)
+    {
+        fsErrorHandler.getAndSet(Optional.ofNullable(handler));
+    }
+
+    /**
+     * Returns the size of the specified partition.
+     * <p>This method handles large file system by returning {@code Long.MAX_VALUE} if the  size overflow.
+     * See <a href='https://bugs.openjdk.java.net/browse/JDK-8179320'>JDK-8179320</a> for more information.</p>
+     *
+     * @param file the partition
+     * @return the size, in bytes, of the partition or {@code 0L} if the abstract pathname does not name a partition
+     */
+    public static long getTotalSpace(File file)
+    {
+        return handleLargeFileSystem(file.getTotalSpace());
+    }
+
+    /**
+     * Returns the number of unallocated bytes on the specified partition.
+     * <p>This method handles large file system by returning {@code Long.MAX_VALUE} if the  number of unallocated bytes
+     * overflow. See <a href='https://bugs.openjdk.java.net/browse/JDK-8179320'>JDK-8179320</a> for more information</p>
+     *
+     * @param file the partition
+     * @return the number of unallocated bytes on the partition or {@code 0L}
+     * if the abstract pathname does not name a partition.
+     */
+    public static long getFreeSpace(File file)
+    {
+        return handleLargeFileSystem(file.getFreeSpace());
+    }
+
+    /**
+     * Returns the number of available bytes on the specified partition.
+     * <p>This method handles large file system by returning {@code Long.MAX_VALUE} if the  number of available bytes
+     * overflow. See <a href='https://bugs.openjdk.java.net/browse/JDK-8179320'>JDK-8179320</a> for more information</p>
+     *
+     * @param file the partition
+     * @return the number of available bytes on the partition or {@code 0L}
+     * if the abstract pathname does not name a partition.
+     */
+    public static long getUsableSpace(File file)
+    {
+        return handleLargeFileSystem(file.getUsableSpace());
+    }
+
+    /**
+     * Returns the {@link FileStore} representing the file store where a file
+     * is located. This {@link FileStore} handles large file system by returning {@code Long.MAX_VALUE}
+     * from {@code FileStore#getTotalSpace()}, {@code FileStore#getUnallocatedSpace()} and {@code FileStore#getUsableSpace()}
+     * it the value is bigger than {@code Long.MAX_VALUE}. See <a href='https://bugs.openjdk.java.net/browse/JDK-8162520'>JDK-8162520</a>
+     * for more information.
+     *
+     * @param path the path to the file
+     * @return the file store where the file is stored
+     */
+    public static FileStore getFileStore(Path path) throws IOException
+    {
+        return new SafeFileStore(Files.getFileStore(path));
+    }
+
+    /**
+     * Handle large file system by returning {@code Long.MAX_VALUE} when the size overflows.
+     * @param size returned by the Java's FileStore methods
+     * @return the size or {@code Long.MAX_VALUE} if the size was bigger than {@code Long.MAX_VALUE}
+     */
+    private static long handleLargeFileSystem(long size)
+    {
+        return size < 0 ? Long.MAX_VALUE : size;
+    }
+
+    /**
+     * Private constructor as the class contains only static methods.
+     */
+    private FileUtils()
+    {
+    }
+
+    /**
+     * FileStore decorator used to safely handle large file system.
+     *
+     * <p>Java's FileStore methods (getTotalSpace/getUnallocatedSpace/getUsableSpace) are limited to reporting bytes as
+     * signed long (2^63-1), if the filesystem is any bigger, then the size overflows. {@code SafeFileStore} will
+     * return {@code Long.MAX_VALUE} if the size overflow.</p>
+     *
+     * @see https://bugs.openjdk.java.net/browse/JDK-8162520.
+     */
+    private static final class SafeFileStore extends FileStore
+    {
+        /**
+         * The decorated {@code FileStore}
+         */
+        private final FileStore fileStore;
+
+        public SafeFileStore(FileStore fileStore)
+        {
+            this.fileStore = fileStore;
+        }
+
+        @Override
+        public String name()
+        {
+            return fileStore.name();
+        }
+
+        @Override
+        public String type()
+        {
+            return fileStore.type();
+        }
+
+        @Override
+        public boolean isReadOnly()
+        {
+            return fileStore.isReadOnly();
+        }
+
+        @Override
+        public long getTotalSpace() throws IOException
+        {
+            return handleLargeFileSystem(fileStore.getTotalSpace());
+        }
+
+        @Override
+        public long getUsableSpace() throws IOException
+        {
+            return handleLargeFileSystem(fileStore.getUsableSpace());
+        }
+
+        @Override
+        public long getUnallocatedSpace() throws IOException
+        {
+            return handleLargeFileSystem(fileStore.getUnallocatedSpace());
+        }
+
+        @Override
+        public boolean supportsFileAttributeView(Class<? extends FileAttributeView> type)
+        {
+            return fileStore.supportsFileAttributeView(type);
+        }
+
+        @Override
+        public boolean supportsFileAttributeView(String name)
+        {
+            return fileStore.supportsFileAttributeView(name);
+        }
+
+        @Override
+        public <V extends FileStoreAttributeView> V getFileStoreAttributeView(Class<V> type)
+        {
+            return fileStore.getFileStoreAttributeView(type);
+        }
+
+        @Override
+        public Object getAttribute(String attribute) throws IOException
+        {
+            return fileStore.getAttribute(attribute);
         }
     }
 }

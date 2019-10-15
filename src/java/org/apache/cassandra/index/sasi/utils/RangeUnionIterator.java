@@ -36,6 +36,7 @@ import org.apache.cassandra.io.util.FileUtils;
  * @param <K> The type used to sort ranges.
  * @param <D> The container type which is going to be returned by {@link Iterator#next()}.
  */
+@SuppressWarnings("resource")
 public class RangeUnionIterator<K extends Comparable<K>, D extends CombinedValue<K>> extends RangeIterator<K, D>
 {
     private final PriorityQueue<RangeIterator<K, D>> ranges;
@@ -152,7 +153,14 @@ public class RangeUnionIterator<K extends Comparable<K>, D extends CombinedValue
 
         protected RangeIterator<K, D> buildIterator()
         {
-            return new RangeUnionIterator<>(statistics, ranges);
+            switch (rangeCount())
+            {
+                case 1:
+                    return ranges.poll();
+
+                default:
+                    return new RangeUnionIterator<>(statistics, ranges);
+            }
         }
     }
 }

@@ -25,12 +25,11 @@ import org.apache.cassandra.config.ColumnDefinition;
 import org.apache.cassandra.cql3.restrictions.Restriction;
 import org.apache.cassandra.cql3.statements.Bound;
 import org.apache.cassandra.exceptions.InvalidRequestException;
-import org.apache.cassandra.exceptions.UnrecognizedEntityException;
 
 import static org.apache.cassandra.cql3.statements.RequestValidations.invalidRequest;
 
-public abstract class Relation {
-
+public abstract class Relation
+{
     protected Operator relationType;
 
     public Operator operator()
@@ -112,7 +111,9 @@ public abstract class Relation {
     {
         return relationType == Operator.LIKE_PREFIX
                 || relationType == Operator.LIKE_SUFFIX
-                || relationType == Operator.LIKE_CONTAINS;
+                || relationType == Operator.LIKE_CONTAINS
+                || relationType == Operator.LIKE_MATCHES
+                || relationType == Operator.LIKE;
     }
 
     /**
@@ -153,9 +154,20 @@ public abstract class Relation {
             case LIKE_PREFIX:
             case LIKE_SUFFIX:
             case LIKE_CONTAINS:
+            case LIKE_MATCHES:
+            case LIKE:
                 return newLikeRestriction(cfm, boundNames, relationType);
             default: throw invalidRequest("Unsupported \"!=\" relation: %s", this);
         }
+    }
+
+    /**
+     * Required for SuperColumn compatibility, creates an adapter Relation that remaps all restrictions required for
+     * SuperColumn tables.
+     */
+    public Relation toSuperColumnAdapter()
+    {
+        throw invalidRequest("Unsupported operation (" + this + ") on super column family");
     }
 
     /**
@@ -257,31 +269,11 @@ public abstract class Relation {
     }
 
     /**
-     * Converts the specified entity into a column definition.
-     *
-     * @param cfm the column family meta data
-     * @param entity the entity to convert
-     * @return the column definition corresponding to the specified entity
-     * @throws InvalidRequestException if the entity cannot be recognized
-     */
-    protected final ColumnDefinition toColumnDefinition(CFMetaData cfm,
-                                                        ColumnIdentifier.Raw entity) throws InvalidRequestException
-    {
-        ColumnIdentifier identifier = entity.prepare(cfm);
-        ColumnDefinition def = cfm.getColumnDefinition(identifier);
-
-        if (def == null)
-            throw new UnrecognizedEntityException(identifier, this);
-
-        return def;
-    }
-
-    /**
      * Renames an identifier in this Relation, if applicable.
      * @param from the old identifier
      * @param to the new identifier
      * @return this object, if the old identifier is not in the set of entities that this relation covers; otherwise
      *         a new Relation with "from" replaced by "to" is returned.
      */
-    public abstract Relation renameIdentifier(ColumnIdentifier.Raw from, ColumnIdentifier.Raw to);
+    public abstract Relation renameIdentifier(ColumnDefinition.Raw from, ColumnDefinition.Raw to);
 }

@@ -1,7 +1,28 @@
+/*
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
 package org.apache.cassandra.db.transform;
 
 import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.DeletionTime;
+import org.apache.cassandra.db.PartitionColumns;
 import org.apache.cassandra.db.partitions.PartitionIterator;
 import org.apache.cassandra.db.partitions.UnfilteredPartitionIterator;
 import org.apache.cassandra.db.rows.*;
@@ -89,6 +110,17 @@ public abstract class Transformation<I extends BaseRowIterator<?>>
         return deletionTime;
     }
 
+    /**
+     * Applied to the {@code PartitionColumns} of any rows iterator.
+     *
+     * NOTE: same remark than for applyToDeletion: it is only applied to the first iterator in a sequence of iterators
+     * filled by MoreContents.
+     */
+    protected PartitionColumns applyToPartitionColumns(PartitionColumns columns)
+    {
+        return columns;
+    }
+
 
     //******************************************************
     //          Static Application Methods
@@ -135,6 +167,29 @@ public abstract class Transformation<I extends BaseRowIterator<?>>
         return iterator instanceof FilteredRows
                ? (FilteredRows) iterator
                : new FilteredRows(iterator);
+    }
+
+    /**
+     * Even though this method is sumilar to `mutable`, it supresses the optimisation of avoiding creating an additional
+     * wrapping interator object (which both creates an extra object and grows the call stack during the iteration), it
+     * should be used with caution.
+     *
+     * It is useful in cases when the input has to be checked for more contents rather than directly checking if it
+     * is stopped. For example, when concatenating two iterators (pseudocode):
+     *
+     *    iter1 = [row(1), row(2), row(3)]
+     *    iter2 = [row(4), row(5), row(6)]
+     *
+     *    UnfilteredRowIterators.concat(DataLimits.cqlLimits(1).filter(iter1), DataLimits.cqlLimits(1).filter(iter1))
+     *
+     * Which should yield two rows: [row(1), row(4)].
+     *
+     * Using stacked transformations instead of wrapping would result into returning a single row, since the first
+     * iterator will signal the iterator is stopped.
+     */
+    static UnfilteredRows wrapIterator(UnfilteredRowIterator iterator, PartitionColumns columns)
+    {
+        return new UnfilteredRows(iterator, columns);
     }
 
     static <E extends BaseIterator> E add(E to, Transformation add)

@@ -1,37 +1,64 @@
+/*
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
 package org.apache.cassandra.index;
 
 import java.util.*;
 import java.util.concurrent.Callable;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.Sets;
 import org.junit.Test;
 
+import com.datastax.driver.core.exceptions.QueryValidationException;
 import org.apache.cassandra.Util;
 import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.cql3.CQLTester;
 import org.apache.cassandra.cql3.ColumnIdentifier;
 import org.apache.cassandra.cql3.restrictions.IndexRestrictions;
+import org.apache.cassandra.cql3.restrictions.StatementRestrictions;
 import org.apache.cassandra.cql3.statements.IndexTarget;
 import org.apache.cassandra.cql3.statements.ModificationStatement;
-import org.apache.cassandra.cql3.statements.SelectStatement;
-import org.apache.cassandra.db.ColumnFamilyStore;
-import org.apache.cassandra.db.ReadCommand;
-import org.apache.cassandra.db.ReadExecutionController;
+import org.apache.cassandra.db.*;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.Int32Type;
 import org.apache.cassandra.db.marshal.UTF8Type;
 import org.apache.cassandra.db.partitions.UnfilteredPartitionIterator;
+import org.apache.cassandra.db.rows.Row;
 import org.apache.cassandra.exceptions.InvalidRequestException;
+import org.apache.cassandra.index.transactions.IndexTransaction;
 import org.apache.cassandra.schema.IndexMetadata;
 import org.apache.cassandra.schema.Indexes;
+import org.apache.cassandra.transport.ProtocolVersion;
+import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
+import org.apache.cassandra.utils.concurrent.OpOrder;
 
 import static org.apache.cassandra.Util.throwAssert;
 import static org.apache.cassandra.cql3.statements.IndexTarget.CUSTOM_INDEX_OPTION_NAME;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
@@ -49,6 +76,17 @@ public class CustomIndexTest extends CQLTester
         execute("INSERT INTO %s (a, b, c, d) VALUES (?, ?, ?, ?)", 0, 0, 0, 2);
         execute("INSERT INTO %s (a, b, c, d) VALUES (?, ?, ?, ?)", 0, 1, 0, 1);
         execute("INSERT INTO %s (a, b, c, d) VALUES (?, ?, ?, ?)", 0, 2, 0, 0);
+    }
+
+    @Test
+    public void testTruncateWithNonCfsCustomIndex() throws Throwable
+    {
+        // deadlocks and times out the test in the face of the synchronisation
+        // issues described in the comments on CASSANDRA-9669
+        createTable("CREATE TABLE %s (a int, b int, c int, PRIMARY KEY (a))");
+        createIndex("CREATE CUSTOM INDEX b_index ON %s(b) USING 'org.apache.cassandra.index.StubIndex'");
+        execute("INSERT INTO %s (a, b, c) VALUES (?, ?, ?)", 0, 1, 2);
+        getCurrentColumnFamilyStore().truncateBlocking();
     }
 
     @Test
@@ -314,52 +352,73 @@ public class CustomIndexTest extends CQLTester
     {
         Object[] row = row(0, 0, 0, 0);
         createTable("CREATE TABLE %s (a int, b int, c int, d int, PRIMARY KEY (a, b))");
+        String indexName = currentTable() + "_custom_index";
         execute("INSERT INTO %s (a, b, c, d) VALUES (?, ?, ?, ?)", row);
 
-        assertInvalidMessage(String.format(IndexRestrictions.INDEX_NOT_FOUND, "custom_index", keyspace(), currentTable()),
-                             "SELECT * FROM %s WHERE expr(custom_index, 'foo bar baz')");
 
-        createIndex(String.format("CREATE CUSTOM INDEX custom_index ON %%s(c) USING '%s'", StubIndex.class.getName()));
+        assertInvalidMessage(String.format(IndexRestrictions.INDEX_NOT_FOUND, indexName, keyspace(), currentTable()),
+                             String.format("SELECT * FROM %%s WHERE expr(%s, 'foo bar baz')", indexName));
 
-        assertInvalidMessage(String.format(IndexRestrictions.INDEX_NOT_FOUND, "no_such_index", keyspace(), currentTable()),
-                             "SELECT * FROM %s WHERE expr(no_such_index, 'foo bar baz ')");
+        createIndex(String.format("CREATE CUSTOM INDEX %s ON %%s(c) USING '%s'", indexName, StubIndex.class.getName()));
+
+        assertInvalidThrowMessage(Optional.of(ProtocolVersion.CURRENT),
+                                  String.format(IndexRestrictions.INDEX_NOT_FOUND, "no_such_index", keyspace(), currentTable()),
+                                  QueryValidationException.class,
+                                  "SELECT * FROM %s WHERE expr(no_such_index, 'foo bar baz ')");
 
         // simple case
-        assertRows(execute("SELECT * FROM %s WHERE expr(custom_index, 'foo bar baz')"), row);
-        assertRows(execute("SELECT * FROM %s WHERE expr(\"custom_index\", 'foo bar baz')"), row);
-        assertRows(execute("SELECT * FROM %s WHERE expr(custom_index, $$foo \" ~~~ bar Baz$$)"), row);
+        assertRows(execute(String.format("SELECT * FROM %%s WHERE expr(%s, 'foo bar baz')", indexName)), row);
+        assertRows(execute(String.format("SELECT * FROM %%s WHERE expr(\"%s\", 'foo bar baz')", indexName)), row);
+        assertRows(execute(String.format("SELECT * FROM %%s WHERE expr(%s, $$foo \" ~~~ bar Baz$$)", indexName)), row);
 
         // multiple expressions on the same index
-        assertInvalidMessage(IndexRestrictions.MULTIPLE_EXPRESSIONS,
-                             "SELECT * FROM %s WHERE expr(custom_index, 'foo') AND expr(custom_index, 'bar')");
+        assertInvalidThrowMessage(Optional.of(ProtocolVersion.CURRENT),
+                                  IndexRestrictions.MULTIPLE_EXPRESSIONS,
+                                  QueryValidationException.class,
+                                  String.format("SELECT * FROM %%s WHERE expr(%1$s, 'foo') AND expr(%1$s, 'bar')",
+                                                indexName));
 
         // multiple expressions on different indexes
         createIndex(String.format("CREATE CUSTOM INDEX other_custom_index ON %%s(d) USING '%s'", StubIndex.class.getName()));
-        assertInvalidMessage(IndexRestrictions.MULTIPLE_EXPRESSIONS,
-                             "SELECT * FROM %s WHERE expr(custom_index, 'foo') AND expr(other_custom_index, 'bar')");
+        assertInvalidThrowMessage(Optional.of(ProtocolVersion.CURRENT),
+                                  IndexRestrictions.MULTIPLE_EXPRESSIONS,
+                                  QueryValidationException.class,
+                                  String.format("SELECT * FROM %%s WHERE expr(%s, 'foo') AND expr(other_custom_index, 'bar')",
+                                                indexName));
 
-        assertInvalidMessage(SelectStatement.REQUIRES_ALLOW_FILTERING_MESSAGE,
-                             "SELECT * FROM %s WHERE expr(custom_index, 'foo') AND d=0");
-        assertRows(execute("SELECT * FROM %s WHERE expr(custom_index, 'foo') AND d=0 ALLOW FILTERING"), row);
+        assertInvalidThrowMessage(Optional.of(ProtocolVersion.CURRENT),
+                                  StatementRestrictions.REQUIRES_ALLOW_FILTERING_MESSAGE,
+                                  QueryValidationException.class,
+                                  String.format("SELECT * FROM %%s WHERE expr(%s, 'foo') AND d=0", indexName));
+        assertRows(execute(String.format("SELECT * FROM %%s WHERE expr(%s, 'foo') AND d=0 ALLOW FILTERING", indexName)), row);
     }
 
     @Test
     public void customIndexDoesntSupportCustomExpressions() throws Throwable
     {
         createTable("CREATE TABLE %s (a int, b int, c int, d int, PRIMARY KEY (a, b))");
-        createIndex(String.format("CREATE CUSTOM INDEX custom_index ON %%s(c) USING '%s'",
+        String indexName = currentTable() + "_custom_index";
+        createIndex(String.format("CREATE CUSTOM INDEX %s ON %%s(c) USING '%s'",
+                                  indexName,
                                   NoCustomExpressionsIndex.class.getName()));
-        assertInvalidMessage(String.format( IndexRestrictions.CUSTOM_EXPRESSION_NOT_SUPPORTED, "custom_index"),
-                             "SELECT * FROM %s WHERE expr(custom_index, 'foo bar baz')");
+        assertInvalidThrowMessage(Optional.of(ProtocolVersion.CURRENT),
+                                  String.format( IndexRestrictions.CUSTOM_EXPRESSION_NOT_SUPPORTED, indexName),
+                                  QueryValidationException.class,
+                                  String.format("SELECT * FROM %%s WHERE expr(%s, 'foo bar baz')", indexName));
     }
 
     @Test
     public void customIndexRejectsExpressionSyntax() throws Throwable
     {
         createTable("CREATE TABLE %s (a int, b int, c int, d int, PRIMARY KEY (a, b))");
-        createIndex(String.format("CREATE CUSTOM INDEX custom_index ON %%s(c) USING '%s'",
-                                  ExpressionRejectingIndex.class.getName()));
-        assertInvalidMessage("None shall pass", "SELECT * FROM %s WHERE expr(custom_index, 'foo bar baz')");
+        String indexName = currentTable() + "_custom_index";
+        createIndex(String.format("CREATE CUSTOM INDEX %s ON %%s(c) USING '%s'",
+                                  indexName,
+                                  AlwaysRejectIndex.class.getName()));
+        assertInvalidThrowMessage(Optional.of(ProtocolVersion.CURRENT),
+                                  "None shall pass",
+                                  QueryValidationException.class,
+                                  String.format("SELECT * FROM %%s WHERE expr(%s, 'foo bar baz')", indexName));
     }
 
     @Test
@@ -367,34 +426,44 @@ public class CustomIndexTest extends CQLTester
     {
         createTable("CREATE TABLE %s (a int, b int, c int, d int, PRIMARY KEY (a, b))");
         createIndex("CREATE INDEX non_custom_index ON %s(c)");
-        assertInvalidMessage(String.format(IndexRestrictions.NON_CUSTOM_INDEX_IN_EXPRESSION, "non_custom_index"),
-                             "SELECT * FROM %s WHERE expr(non_custom_index, 'c=0')");
+        assertInvalidThrowMessage(Optional.of(ProtocolVersion.CURRENT),
+                                  String.format(IndexRestrictions.NON_CUSTOM_INDEX_IN_EXPRESSION, "non_custom_index"),
+                                  QueryValidationException.class,
+                                  "SELECT * FROM %s WHERE expr(non_custom_index, 'c=0')");
     }
 
     @Test
     public void customExpressionsDisallowedInModifications() throws Throwable
     {
         createTable("CREATE TABLE %s (a int, b int, c int, d int, PRIMARY KEY (a, b))");
-        createIndex(String.format("CREATE CUSTOM INDEX custom_index ON %%s(c) USING '%s'", StubIndex.class.getName()));
+        String indexName = currentTable() + "_custom_index";
+        createIndex(String.format("CREATE CUSTOM INDEX %s ON %%s(c) USING '%s'",
+                                  indexName, StubIndex.class.getName()));
 
-        assertInvalidMessage(ModificationStatement.CUSTOM_EXPRESSIONS_NOT_ALLOWED,
-                             "DELETE FROM %s WHERE expr(custom_index, 'foo bar baz ')");
-        assertInvalidMessage(ModificationStatement.CUSTOM_EXPRESSIONS_NOT_ALLOWED,
-                             "UPDATE %s SET d=0 WHERE expr(custom_index, 'foo bar baz ')");
+        assertInvalidThrowMessage(Optional.of(ProtocolVersion.CURRENT),
+                                  ModificationStatement.CUSTOM_EXPRESSIONS_NOT_ALLOWED,
+                                  QueryValidationException.class,
+                                  String.format("DELETE FROM %%s WHERE expr(%s, 'foo bar baz ')", indexName));
+        assertInvalidThrowMessage(Optional.of(ProtocolVersion.CURRENT),
+                                  ModificationStatement.CUSTOM_EXPRESSIONS_NOT_ALLOWED,
+                                  QueryValidationException.class,
+                                  String.format("UPDATE %%s SET d=0 WHERE expr(%s, 'foo bar baz ')", indexName));
     }
 
     @Test
     public void indexSelectionPrefersMostSelectiveIndex() throws Throwable
     {
         createTable("CREATE TABLE %s(a int, b int, c int, PRIMARY KEY (a))");
-        createIndex(String.format("CREATE CUSTOM INDEX more_selective ON %%s(b) USING '%s'",
+        createIndex(String.format("CREATE CUSTOM INDEX %s_more_selective ON %%s(b) USING '%s'",
+                                  currentTable(),
                                   SettableSelectivityIndex.class.getName()));
-        createIndex(String.format("CREATE CUSTOM INDEX less_selective ON %%s(c) USING '%s'",
+        createIndex(String.format("CREATE CUSTOM INDEX %s_less_selective ON %%s(c) USING '%s'",
+                                  currentTable(),
                                   SettableSelectivityIndex.class.getName()));
         SettableSelectivityIndex moreSelective =
-            (SettableSelectivityIndex)getCurrentColumnFamilyStore().indexManager.getIndexByName("more_selective");
+            (SettableSelectivityIndex)getCurrentColumnFamilyStore().indexManager.getIndexByName(currentTable() + "_more_selective");
         SettableSelectivityIndex lessSelective =
-            (SettableSelectivityIndex)getCurrentColumnFamilyStore().indexManager.getIndexByName("less_selective");
+            (SettableSelectivityIndex)getCurrentColumnFamilyStore().indexManager.getIndexByName(currentTable() + "_less_selective");
         assertEquals(0, moreSelective.searchersProvided);
         assertEquals(0, lessSelective.searchersProvided);
 
@@ -416,14 +485,16 @@ public class CustomIndexTest extends CQLTester
     public void customExpressionForcesIndexSelection() throws Throwable
     {
         createTable("CREATE TABLE %s(a int, b int, c int, PRIMARY KEY (a))");
-        createIndex(String.format("CREATE CUSTOM INDEX more_selective ON %%s(b) USING '%s'",
+        createIndex(String.format("CREATE CUSTOM INDEX %s_more_selective ON %%s(b) USING '%s'",
+                                  currentTable(),
                                   SettableSelectivityIndex.class.getName()));
-        createIndex(String.format("CREATE CUSTOM INDEX less_selective ON %%s(c) USING '%s'",
+        createIndex(String.format("CREATE CUSTOM INDEX %s_less_selective ON %%s(c) USING '%s'",
+                                  currentTable(),
                                   SettableSelectivityIndex.class.getName()));
         SettableSelectivityIndex moreSelective =
-            (SettableSelectivityIndex)getCurrentColumnFamilyStore().indexManager.getIndexByName("more_selective");
+            (SettableSelectivityIndex)getCurrentColumnFamilyStore().indexManager.getIndexByName(currentTable() + "_more_selective");
         SettableSelectivityIndex lessSelective =
-            (SettableSelectivityIndex)getCurrentColumnFamilyStore().indexManager.getIndexByName("less_selective");
+            (SettableSelectivityIndex)getCurrentColumnFamilyStore().indexManager.getIndexByName(currentTable() + "_less_selective");
         assertEquals(0, moreSelective.searchersProvided);
         assertEquals(0, lessSelective.searchersProvided);
 
@@ -435,7 +506,7 @@ public class CustomIndexTest extends CQLTester
         assertEquals(0, lessSelective.searchersProvided);
 
         // when a custom expression is present, its target index should be preferred
-        execute("SELECT * FROM %s WHERE b=0 AND expr(less_selective, 'expression') ALLOW FILTERING");
+        execute(String.format("SELECT * FROM %%s WHERE b=0 AND expr(%s_less_selective, 'expression') ALLOW FILTERING", currentTable()));
         assertEquals(1, moreSelective.searchersProvided);
         assertEquals(1, lessSelective.searchersProvided);
     }
@@ -451,12 +522,16 @@ public class CustomIndexTest extends CQLTester
                                   UTF8ExpressionIndex.class.getName()));
 
         execute("SELECT * FROM %s WHERE expr(text_index, 'foo')");
-        assertInvalidMessage("Invalid INTEGER constant (99) for \"custom index expression\" of type text",
-                             "SELECT * FROM %s WHERE expr(text_index, 99)");
+        assertInvalidThrowMessage(Optional.of(ProtocolVersion.CURRENT),
+                                  "Invalid INTEGER constant (99) for \"custom index expression\" of type text",
+                                  QueryValidationException.class,
+                                  "SELECT * FROM %s WHERE expr(text_index, 99)");
 
         execute("SELECT * FROM %s WHERE expr(int_index, 99)");
-        assertInvalidMessage("Invalid STRING constant (foo) for \"custom index expression\" of type int",
-                             "SELECT * FROM %s WHERE expr(int_index, 'foo')");
+        assertInvalidThrowMessage(Optional.of(ProtocolVersion.CURRENT),
+                                  "Invalid STRING constant (foo) for \"custom index expression\" of type int",
+                                  QueryValidationException.class,
+                                  "SELECT * FROM %s WHERE expr(int_index, 'foo')");
     }
 
     @Test
@@ -506,6 +581,32 @@ public class CustomIndexTest extends CQLTester
     }
 
     @Test
+    public void notifyIndexersOfExpiredRowsDuringCompaction() throws Throwable
+    {
+        createTable("CREATE TABLE %s (k int, c int, PRIMARY KEY (k,c))");
+        createIndex(String.format("CREATE CUSTOM INDEX row_ttl_test_index ON %%s() USING '%s'", StubIndex.class.getName()));
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        StubIndex index  = (StubIndex)cfs.indexManager.getIndexByName("row_ttl_test_index");
+
+        execute("INSERT INTO %s (k, c) VALUES (?, ?) USING TTL 1", 0, 0);
+        execute("INSERT INTO %s (k, c) VALUES (?, ?)", 0, 1);
+        execute("INSERT INTO %s (k, c) VALUES (?, ?)", 0, 2);
+        execute("INSERT INTO %s (k, c) VALUES (?, ?)", 3, 3);
+        assertEquals(4, index.rowsInserted.size());
+        // flush so that we end up with an expiring row in the first sstable
+        flush();
+
+        // let the row with the ttl expire, then force a compaction
+        TimeUnit.SECONDS.sleep(2);
+        compact();
+
+        // the index should have been notified of the expired row
+        assertEquals(1, index.rowsDeleted.size());
+        Integer deletedClustering = Int32Type.instance.compose(index.rowsDeleted.get(0).clustering().get(0));
+        assertEquals(0, deletedClustering.intValue());
+    }
+
+    @Test
     public void validateOptions() throws Throwable
     {
         createTable("CREATE TABLE %s(k int, c int, v1 int, v2 int, PRIMARY KEY(k,c))");
@@ -525,6 +626,216 @@ public class CustomIndexTest extends CQLTester
         assertEquals(cfm, IndexWithOverloadedValidateOptions.cfm);
         assertNotNull(IndexWithOverloadedValidateOptions.options);
         assertEquals("bar", IndexWithOverloadedValidateOptions.options.get("foo"));
+    }
+
+    @Test
+    public void testFailing2iFlush() throws Throwable
+    {
+        createTable("CREATE TABLE %s (pk int PRIMARY KEY, value int)");
+        createIndex("CREATE CUSTOM INDEX IF NOT EXISTS ON %s(value) USING 'org.apache.cassandra.index.CustomIndexTest$BrokenCustom2I'");
+
+        for (int i = 0; i < 10; i++)
+            execute("INSERT INTO %s (pk, value) VALUES (?, ?)", i, i);
+
+        try
+        {
+            getCurrentColumnFamilyStore().forceBlockingFlush();
+            fail("Exception should have been propagated");
+        }
+        catch (Throwable t)
+        {
+            assertTrue(t.getMessage().contains("Broken2I"));
+        }
+
+        // SSTables remain uncommitted.
+        assertEquals(1, getCurrentColumnFamilyStore().getDirectories().getDirectoryForNewSSTables().listFiles().length);
+    }
+
+    @Test
+    public void indexBuildingPagesLargePartitions() throws Throwable
+    {
+        createTable("CREATE TABLE %s(k int, c int, v int, PRIMARY KEY(k,c))");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        SecondaryIndexManager indexManager = cfs.indexManager;
+        int totalRows = SimulateConcurrentFlushingIndex.ROWS_IN_PARTITION;
+        // Insert a single wide partition to be indexed
+        for (int i = 0; i < totalRows; i++)
+            execute("INSERT INTO %s (k, c, v) VALUES (0, ?, ?)", i, i);
+        cfs.forceBlockingFlush();
+
+        // Create the index, which won't automatically start building
+        String indexName = "build_single_partition_idx";
+        createIndex(String.format("CREATE CUSTOM INDEX %s ON %%s(v) USING '%s'",
+                                  indexName, SimulateConcurrentFlushingIndex.class.getName()));
+        SimulateConcurrentFlushingIndex index = (SimulateConcurrentFlushingIndex) indexManager.getIndexByName(indexName);
+
+        // Index the partition with an Indexer which artificially simulates additional concurrent
+        // flush activity by periodically issuing barriers on the read & write op groupings
+        DecoratedKey targetKey = getCurrentColumnFamilyStore().decorateKey(ByteBufferUtil.bytes(0));
+        indexManager.indexPartition(targetKey, Collections.singleton(index), totalRows / 10);
+
+        // When indexing is done check that:
+        // * The base table's read ordering at finish was > the one at the start (i.e. that
+        //   we didn't hold a single read OpOrder.Group for the whole operation.
+        // * That multiple write OpOrder.Groups were used to perform the writes to the index
+        // * That all operations are complete, that none of the relevant OpOrder.Groups are
+        //   marked as blocking progress and that all the barriers' ops are considered done.
+        assertTrue(index.readOrderingAtFinish.compareTo(index.readOrderingAtStart) > 0);
+        assertTrue(index.writeGroups.size() > 1);
+        assertFalse(index.readOrderingAtFinish.isBlocking());
+        index.writeGroups.forEach(group -> assertFalse(group.isBlocking()));
+        index.barriers.forEach(OpOrder.Barrier::allPriorOpsAreFinished);
+    }
+
+    @Test
+    public void partitionIndexTest() throws Throwable
+    {
+        createTable("CREATE TABLE %s(k int, c int, v int, s int static, PRIMARY KEY(k,c))");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+
+        execute("INSERT INTO %s (k, c, v) VALUES (?, ?, ?)", 1, 1, 1);
+        execute("INSERT INTO %s (k, c, v) VALUES (?, ?, ?)", 1, 2, 2);
+        execute("INSERT INTO %s (k, c, v) VALUES (?, ?, ?)", 1, 3, 3);
+
+        execute("INSERT INTO %s (k, c) VALUES (?, ?)", 2, 2);
+
+        execute("INSERT INTO %s (k, c, v) VALUES (?, ?, ?)", 3, 1, 1);
+        execute("INSERT INTO %s (k, c, v) VALUES (?, ?, ?)", 3, 2, 2);
+        execute("INSERT INTO %s (k, c, v) VALUES (?, ?, ?)", 3, 3, 3);
+        execute("DELETE FROM %s WHERE k = ? AND c >= ?", 3, 3);
+        execute("DELETE FROM %s WHERE k = ? AND c <= ?", 3, 1);
+
+        execute("INSERT INTO %s (k, c, v) VALUES (?, ?, ?)", 4, 1, 1);
+        execute("INSERT INTO %s (k, c, v) VALUES (?, ?, ?)", 4, 2, 2);
+        execute("DELETE FROM %s WHERE k = ? AND c = ?", 4, 1);
+
+        execute("INSERT INTO %s (k, c, v) VALUES (?, ?, ?)", 5, 1, 1);
+        execute("INSERT INTO %s (k, c, v) VALUES (?, ?, ?)", 5, 2, 2);
+        execute("INSERT INTO %s (k, c, v) VALUES (?, ?, ?)", 5, 3, 3);
+        execute("DELETE FROM %s WHERE k = ?", 5);
+
+        cfs.forceBlockingFlush();
+
+        String indexName = "partition_index_test_idx";
+        createIndex(String.format("CREATE CUSTOM INDEX %s ON %%s(v) USING '%s'",
+                                  indexName, StubIndex.class.getName()));
+
+        SecondaryIndexManager indexManager = cfs.indexManager;
+        StubIndex index = (StubIndex) indexManager.getIndexByName(indexName);
+
+        DecoratedKey targetKey;
+        for (int pageSize = 1; pageSize <= 5; pageSize++)
+        {
+            targetKey = getCurrentColumnFamilyStore().decorateKey(ByteBufferUtil.bytes(1));
+            indexManager.indexPartition(targetKey, Collections.singleton(index), pageSize);
+            assertEquals(3, index.rowsInserted.size());
+            assertEquals(0, index.rangeTombstones.size());
+            assertTrue(index.partitionDeletions.get(0).isLive());
+            index.reset();
+        }
+
+        for (int pageSize = 1; pageSize <= 5; pageSize++)
+        {
+            targetKey = getCurrentColumnFamilyStore().decorateKey(ByteBufferUtil.bytes(2));
+            indexManager.indexPartition(targetKey, Collections.singleton(index), pageSize);
+            assertEquals(1, index.rowsInserted.size());
+            assertEquals(0, index.rangeTombstones.size());
+            assertTrue(index.partitionDeletions.get(0).isLive());
+            index.reset();
+        }
+
+        for (int pageSize = 1; pageSize <= 5; pageSize++)
+        {
+            targetKey = getCurrentColumnFamilyStore().decorateKey(ByteBufferUtil.bytes(3));
+            indexManager.indexPartition(targetKey, Collections.singleton(index), pageSize);
+            assertEquals(1, index.rowsInserted.size());
+            assertEquals(2, index.rangeTombstones.size());
+            assertTrue(index.partitionDeletions.get(0).isLive());
+            index.reset();
+        }
+
+        for (int pageSize = 1; pageSize <= 5; pageSize++)
+        {
+            targetKey = getCurrentColumnFamilyStore().decorateKey(ByteBufferUtil.bytes(5));
+            indexManager.indexPartition(targetKey, Collections.singleton(index), pageSize);
+            assertEquals(1, index.partitionDeletions.size());
+            assertFalse(index.partitionDeletions.get(0).isLive());
+            index.reset();
+        }
+    }
+
+    @Test
+    public void partitionIsNotOverIndexed() throws Throwable
+    {
+        createTable("CREATE TABLE %s(k int, c int, v int, PRIMARY KEY(k,c))");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        SecondaryIndexManager indexManager = cfs.indexManager;
+
+        int totalRows = 1;
+
+        // Insert a single row partition to be indexed
+        for (int i = 0; i < totalRows; i++)
+            execute("INSERT INTO %s (k, c, v) VALUES (0, ?, ?)", i, i);
+        cfs.forceBlockingFlush();
+
+        // Create the index, which won't automatically start building
+        String indexName = "partition_overindex_test_idx";
+        createIndex(String.format("CREATE CUSTOM INDEX %s ON %%s(v) USING '%s'",
+                                  indexName, StubIndex.class.getName()));
+        StubIndex index = (StubIndex) indexManager.getIndexByName(indexName);
+
+        // Index the partition
+        DecoratedKey targetKey = getCurrentColumnFamilyStore().decorateKey(ByteBufferUtil.bytes(0));
+        indexManager.indexPartition(targetKey, Collections.singleton(index), totalRows);
+
+        // Assert only one partition is counted
+        assertEquals(1, index.beginCalls);
+        assertEquals(1, index.finishCalls);
+    }
+
+    @Test
+    public void rangeTombstoneTest() throws Throwable
+    {
+        createTable("CREATE TABLE %s(k int, c int, v int, v2 int, PRIMARY KEY(k,c))");
+        ColumnFamilyStore cfs = getCurrentColumnFamilyStore();
+        SecondaryIndexManager indexManager = cfs.indexManager;
+
+        // Insert a single range tombstone
+        execute("DELETE FROM %s WHERE k=1 and c > 2");
+        cfs.forceBlockingFlush();
+
+        // Create the index, which won't automatically start building
+        String indexName = "range_tombstone_idx";
+        createIndex(String.format("CREATE CUSTOM INDEX %s ON %%s(v) USING '%s'",
+                                  indexName, StubIndex.class.getName()));
+        String indexName2 = "range_tombstone_idx2";
+        createIndex(String.format("CREATE CUSTOM INDEX %s ON %%s(v2) USING '%s'",
+                                  indexName2, StubIndex.class.getName()));
+
+        StubIndex index = (StubIndex) indexManager.getIndexByName(indexName);
+        StubIndex index2 = (StubIndex) indexManager.getIndexByName(indexName2);
+
+        // Index the partition
+        DecoratedKey targetKey = getCurrentColumnFamilyStore().decorateKey(ByteBufferUtil.bytes(1));
+        indexManager.indexPartition(targetKey, Sets.newHashSet(index, index2), 1);
+
+        // and both indexes should have the same range tombstone
+        assertEquals(index.rangeTombstones, index2.rangeTombstones);
+    }
+
+
+    // Used for index creation above
+    public static class BrokenCustom2I extends StubIndex
+    {
+        public BrokenCustom2I(ColumnFamilyStore baseCfs, IndexMetadata metadata)
+        {
+            super(baseCfs, metadata);
+        }
+
+        public Callable<?> getBlockingFlushTask()
+        {
+            throw new RuntimeException("Broken2I");
+        }
     }
 
     private void testCreateIndex(String indexName, String... targetColumnNames) throws Throwable
@@ -683,16 +994,21 @@ public class CustomIndexTest extends CQLTester
         }
     }
 
-    public static final class ExpressionRejectingIndex extends StubIndex
+    public static final class AlwaysRejectIndex extends StubIndex
     {
-        public ExpressionRejectingIndex(ColumnFamilyStore baseCfs, IndexMetadata metadata)
+        public AlwaysRejectIndex(ColumnFamilyStore baseCfs, IndexMetadata metadata)
         {
             super(baseCfs, metadata);
         }
 
-        public Searcher searcherFor(ReadCommand command) throws InvalidRequestException
+        public void validate(ReadCommand command) throws InvalidRequestException
         {
             throw new InvalidRequestException("None shall pass");
+        }
+
+        public Searcher searcherFor(ReadCommand command)
+        {
+            throw new InvalidRequestException("None shall pass (though I'd have expected to fail faster)");
         }
     }
 
@@ -727,6 +1043,91 @@ public class CustomIndexTest extends CQLTester
             IndexWithOverloadedValidateOptions.options = options;
             IndexWithOverloadedValidateOptions.cfm = cfm;
             return new HashMap<>();
+        }
+    }
+
+    public static final class SimulateConcurrentFlushingIndex extends StubIndex
+    {
+        ColumnFamilyStore baseCfs;
+        AtomicInteger indexedRowCount = new AtomicInteger(0);
+
+        OpOrder.Group readOrderingAtStart = null;
+        OpOrder.Group readOrderingAtFinish = null;
+        Set<OpOrder.Group> writeGroups = new HashSet<>();
+        List<OpOrder.Barrier> barriers = new ArrayList<>();
+
+        static final int ROWS_IN_PARTITION = 1000;
+
+        public SimulateConcurrentFlushingIndex(ColumnFamilyStore baseCfs, IndexMetadata metadata)
+        {
+            super(baseCfs, metadata);
+            this.baseCfs = baseCfs;
+        }
+
+        // When indexing an entire partition 2 potential problems can be caused by
+        // whilst holding a single read & a single write OpOrder.Group.
+        // * By holding a write group too long, flushes are blocked
+        // * Holding a read group for too long prevents the memory from flushed memtables
+        //   from being reclaimed.
+        // See CASSANDRA-12796 for details.
+        // To test that the index builder pages through a large partition, using
+        // finer grained OpOrder.Groups we write a "large" partition to disk, then
+        // kick off an index build on it, using this indexer.
+        // To simulate concurrent flush activity, we periodically issue barriers on
+        // the current read and write groups.
+        // When we're done indexing the partition, the test checks the states of the
+        // various OpOrder.Groups, which it can obtain from this index.
+
+        public Indexer indexerFor(final DecoratedKey key,
+                                  PartitionColumns columns,
+                                  int nowInSec,
+                                  OpOrder.Group opGroup,
+                                  IndexTransaction.Type transactionType)
+        {
+            if (readOrderingAtStart == null)
+                readOrderingAtStart = baseCfs.readOrdering.getCurrent();
+
+            writeGroups.add(opGroup);
+
+            return new Indexer()
+            {
+                public void begin()
+                {
+                    // to simulate other activity on base table during indexing, issue
+                    // barriers on the read and write orderings. This is analogous to
+                    // what happens when other flushes are being processed during the
+                    // indexing of a partition
+                    OpOrder.Barrier readBarrier = baseCfs.readOrdering.newBarrier();
+                    readBarrier.issue();
+                    barriers.add(readBarrier);
+                    OpOrder.Barrier writeBarrier = Keyspace.writeOrder.newBarrier();
+                    writeBarrier.issue();
+                    barriers.add(writeBarrier);
+                }
+
+                public void insertRow(Row row)
+                {
+                    indexedRowCount.incrementAndGet();
+                }
+
+                public void finish()
+                {
+                    // we've indexed all rows in the target partition,
+                    // grab the read OpOrder.Group for the base CFS so
+                    // we can compare it with the starting group
+                    if (indexedRowCount.get() < ROWS_IN_PARTITION)
+                        readOrderingAtFinish = baseCfs.readOrdering.getCurrent();
+                }
+
+                public void partitionDelete(DeletionTime deletionTime) { }
+
+                public void rangeTombstone(RangeTombstone tombstone) { }
+
+                public void updateRow(Row oldRowData, Row newRowData) { }
+
+                public void removeRow(Row row) { }
+
+            };
         }
     }
 }

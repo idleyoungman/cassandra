@@ -29,7 +29,7 @@ import org.apache.cassandra.db.rows.Row;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.serializers.MarshalException;
 
-import static org.apache.cassandra.io.sstable.IndexHelper.IndexInfo;
+import org.apache.cassandra.io.sstable.IndexInfo;
 
 /**
  * A comparator of clustering prefixes (or more generally of {@link Clusterable}}.
@@ -144,7 +144,21 @@ public class ClusteringComparator implements Comparator<Clusterable>
 
     public int compare(Clustering c1, Clustering c2)
     {
-        for (int i = 0; i < size(); i++)
+        return compare(c1, c2, size());
+    }
+
+    /**
+     * Compares the specified part of the specified clusterings.
+     *
+     * @param c1 the first clustering
+     * @param c2 the second clustering
+     * @param size the number of components to compare
+     * @return a negative integer, zero, or a positive integer as the first argument is less than,
+     * equal to, or greater than the second.
+     */
+    public int compare(Clustering c1, Clustering c2, int size)
+    {
+        for (int i = 0; i < size; i++)
         {
             int cmp = compareComponent(i, c1.get(i), c2.get(i));
             if (cmp != 0)

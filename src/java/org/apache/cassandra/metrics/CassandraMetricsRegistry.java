@@ -17,13 +17,15 @@
  */
 package org.apache.cassandra.metrics;
 
-import java.lang.management.ManagementFactory;
 import java.lang.reflect.Method;
 import java.util.Locale;
 import java.util.concurrent.TimeUnit;
 
 import com.codahale.metrics.*;
-import javax.management.*;
+import javax.management.MalformedObjectNameException;
+import javax.management.ObjectName;
+
+import org.apache.cassandra.utils.MBeanWrapper;
 
 /**
  * Makes integrating 3.0 metrics API with 2.0.
@@ -35,7 +37,7 @@ public class CassandraMetricsRegistry extends MetricRegistry
 {
     public static final CassandraMetricsRegistry Metrics = new CassandraMetricsRegistry();
 
-    private final MBeanServer mBeanServer = ManagementFactory.getPlatformMBeanServer();
+    private final MBeanWrapper mBeanServer = MBeanWrapper.instance;
 
     private CassandraMetricsRegistry()
     {
@@ -74,7 +76,7 @@ public class CassandraMetricsRegistry extends MetricRegistry
 
     public Histogram histogram(MetricName name, boolean considerZeroes)
     {
-        Histogram histogram = register(name, new ClearableHistogram(new EstimatedHistogramReservoir(considerZeroes)));
+        Histogram histogram = register(name, new ClearableHistogram(new DecayingEstimatedHistogramReservoir(considerZeroes)));
         registerMBean(histogram, name.getMBeanName());
 
         return histogram;
@@ -89,7 +91,7 @@ public class CassandraMetricsRegistry extends MetricRegistry
 
     public Timer timer(MetricName name)
     {
-        Timer timer = register(name, new Timer(new EstimatedHistogramReservoir(false)));
+        Timer timer = register(name, new Timer(new DecayingEstimatedHistogramReservoir()));
         registerMBean(timer, name.getMBeanName());
 
         return timer;
@@ -173,7 +175,8 @@ public class CassandraMetricsRegistry extends MetricRegistry
         try
         {
             mBeanServer.registerMBean(mbean, name);
-        } catch (Exception ignored) {}
+        }
+        catch (Exception ignored) {}
     }
 
     private void registerAlias(MetricName existingName, MetricName aliasName)
@@ -188,8 +191,8 @@ public class CassandraMetricsRegistry extends MetricRegistry
     {
         try
         {
-            mBeanServer.unregisterMBean(name.getMBeanName());
-        } catch (Exception ignore) {}
+            MBeanWrapper.instance.unregisterMBean(name.getMBeanName());
+        } catch (Exception ignored) {}
     }
     
     /**

@@ -23,8 +23,6 @@ import java.nio.ByteBuffer;
 import java.util.*;
 import java.util.stream.Collectors;
 
-import com.google.common.base.Joiner;
-
 import org.apache.cassandra.config.ColumnDefinition;
 import org.apache.cassandra.cql3.functions.Function;
 import org.apache.cassandra.db.DecoratedKey;
@@ -33,7 +31,7 @@ import org.apache.cassandra.db.marshal.*;
 import org.apache.cassandra.exceptions.InvalidRequestException;
 import org.apache.cassandra.serializers.CollectionSerializer;
 import org.apache.cassandra.serializers.MarshalException;
-import org.apache.cassandra.transport.Server;
+import org.apache.cassandra.transport.ProtocolVersion;
 import org.apache.cassandra.utils.ByteBufferUtil;
 
 /**
@@ -124,6 +122,18 @@ public abstract class Sets
             return AssignmentTestable.TestResult.testAll(keyspace, valueSpec, elements);
         }
 
+        @Override
+        public AbstractType<?> getExactTypeIfKnown(String keyspace)
+        {
+            for (Term.Raw term : elements)
+            {
+                AbstractType<?> type = term.getExactTypeIfKnown(keyspace);
+                if (type != null)
+                    return SetType.getInstance(type, false);
+            }
+            return null;
+        }
+
         public String getText()
         {
             return elements.stream().map(Term.Raw::getText).collect(Collectors.joining(", ", "{", "}"));
@@ -139,7 +149,7 @@ public abstract class Sets
             this.elements = elements;
         }
 
-        public static Value fromSerialized(ByteBuffer value, SetType type, int version) throws InvalidRequestException
+        public static Value fromSerialized(ByteBuffer value, SetType type, ProtocolVersion version) throws InvalidRequestException
         {
             try
             {
@@ -157,7 +167,7 @@ public abstract class Sets
             }
         }
 
-        public ByteBuffer get(int protocolVersion)
+        public ByteBuffer get(ProtocolVersion protocolVersion)
         {
             return CollectionSerializer.pack(elements, elements.size(), protocolVersion);
         }
@@ -217,9 +227,9 @@ public abstract class Sets
             return new Value(buffers);
         }
 
-        public Iterable<Function> getFunctions()
+        public void addFunctionsTo(List<Function> functions)
         {
-            return Terms.getFunctions(elements);
+            Terms.addFunctions(elements, functions);
         }
     }
 
@@ -298,7 +308,7 @@ public abstract class Sets
                 if (value == null)
                     params.addTombstone(column);
                 else
-                    params.addCell(column, value.get(Server.CURRENT_VERSION));
+                    params.addCell(column, value.get(ProtocolVersion.CURRENT));
             }
         }
     }

@@ -1,3 +1,23 @@
+/*
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ *
+ */
 package org.apache.cassandra.db.transform;
 
 import java.util.Iterator;
@@ -13,7 +33,15 @@ abstract class BaseIterator<V, I extends CloseableIterator<? extends V>, O exten
 {
     I input;
     V next;
-    Stop stop; // applies at the end of the current next()
+
+    // We require two stop signals for correctness, since the `stop` reference of the base iterator can "leak"
+    // into the transformations stack. Using a single `stop` signal may result into the inconsistent state,
+    // since stopping transformation would stop only the child iterator.
+
+    // Signals that the base iterator has been signalled to stop. Applies at the end of the current next().
+    Stop stop;
+    // Signals that the current child iterator has been signalled to stop.
+    Stop stopChild;
 
     static class Stop
     {
@@ -29,12 +57,14 @@ abstract class BaseIterator<V, I extends CloseableIterator<? extends V>, O exten
         this.input = copyFrom.input;
         this.next = copyFrom.next;
         this.stop = copyFrom.stop;
+        this.stopChild = copyFrom.stopChild;
     }
 
     BaseIterator(I input)
     {
         this.input = input;
         this.stop = new Stop();
+        this.stopChild = this.stop;
     }
 
     /**
@@ -102,6 +132,7 @@ abstract class BaseIterator<V, I extends CloseableIterator<? extends V>, O exten
                 BaseIterator abstr = (BaseIterator) newContents;
                 prefix = abstr;
                 input = (I) abstr.input;
+                stopChild = abstr.stop;
                 next = apply((V) abstr.next, holder.length); // must apply all remaining functions to the next, if any
             }
 

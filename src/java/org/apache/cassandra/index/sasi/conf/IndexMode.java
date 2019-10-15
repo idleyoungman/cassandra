@@ -71,27 +71,6 @@ public class IndexMode
         this.maxCompactionFlushMemoryInMb = maxFlushMemMb;
     }
 
-    public void validate(Optional<IndexMetadata> config) throws ConfigurationException
-    {
-        if (!config.isPresent())
-            return;
-
-        Map<String, String> indexOptions = config.get().options;
-        // validate that a valid analyzer class was provided if specified
-        if (indexOptions.containsKey(INDEX_ANALYZER_CLASS_OPTION))
-        {
-            try
-            {
-                Class.forName(indexOptions.get(INDEX_ANALYZER_CLASS_OPTION));
-            }
-            catch (ClassNotFoundException e)
-            {
-                throw new ConfigurationException(String.format("Invalid analyzer class option specified [%s]",
-                        indexOptions.get(INDEX_ANALYZER_CLASS_OPTION)));
-            }
-        }
-    }
-
     public AbstractAnalyzer getAnalyzer(AbstractType<?> validator)
     {
         AbstractAnalyzer analyzer = new NoOpAnalyzer();
@@ -114,15 +93,61 @@ public class IndexMode
         return analyzer;
     }
 
-    public static IndexMode getMode(ColumnDefinition column, Optional<IndexMetadata> config)
+    public static void validateAnalyzer(Map<String, String> indexOptions, ColumnDefinition cd) throws ConfigurationException
     {
-        Map<String, String> indexOptions = config.isPresent() ? config.get().options : null;
+        // validate that a valid analyzer class was provided if specified
+        if (indexOptions.containsKey(INDEX_ANALYZER_CLASS_OPTION))
+        {
+            Class<?> analyzerClass;
+            try
+            {
+                analyzerClass = Class.forName(indexOptions.get(INDEX_ANALYZER_CLASS_OPTION));
+            }
+            catch (ClassNotFoundException e)
+            {
+                throw new ConfigurationException(String.format("Invalid analyzer class option specified [%s]",
+                                                               indexOptions.get(INDEX_ANALYZER_CLASS_OPTION)));
+            }
+
+            AbstractAnalyzer analyzer;
+            try
+            {
+                analyzer = (AbstractAnalyzer) analyzerClass.newInstance();
+                if (!analyzer.isCompatibleWith(cd.type))
+                    throw new ConfigurationException(String.format("%s does not support type %s",
+                                                                   analyzerClass.getSimpleName(),
+                                                                   cd.type.asCQL3Type()));
+            }
+            catch (InstantiationException | IllegalAccessException e)
+            {
+                throw new ConfigurationException(String.format("Unable to initialize analyzer class option specified [%s]",
+                                                               analyzerClass.getSimpleName()));
+            }
+        }
+    }
+
+    public static IndexMode getMode(ColumnDefinition column, Optional<IndexMetadata> config) throws ConfigurationException
+    {
+        return getMode(column, config.isPresent() ? config.get().options : null);
+    }
+
+    public static IndexMode getMode(ColumnDefinition column, Map<String, String> indexOptions) throws ConfigurationException
+    {
         if (indexOptions == null || indexOptions.isEmpty())
             return IndexMode.NOT_INDEXED;
 
-        Mode mode = indexOptions.get(INDEX_MODE_OPTION) == null
-                        ? Mode.PREFIX
-                        : Mode.mode(indexOptions.get(INDEX_MODE_OPTION));
+        Mode mode;
+
+        try
+        {
+            mode = indexOptions.get(INDEX_MODE_OPTION) == null
+                            ? Mode.PREFIX
+                            : Mode.mode(indexOptions.get(INDEX_MODE_OPTION));
+        }
+        catch (IllegalArgumentException e)
+        {
+            throw new ConfigurationException("Incorrect index mode: " + indexOptions.get(INDEX_MODE_OPTION));
+        }
 
         boolean isAnalyzed = false;
         Class analyzerClass = null;
@@ -132,16 +157,16 @@ public class IndexMode
             {
                 analyzerClass = Class.forName(indexOptions.get(INDEX_ANALYZER_CLASS_OPTION));
                 isAnalyzed = indexOptions.get(INDEX_ANALYZED_OPTION) == null
-                              ? true : Boolean.valueOf(indexOptions.get(INDEX_ANALYZED_OPTION));
+                              ? true : Boolean.parseBoolean(indexOptions.get(INDEX_ANALYZED_OPTION));
             }
             else if (indexOptions.get(INDEX_ANALYZED_OPTION) != null)
             {
-                isAnalyzed = Boolean.valueOf(indexOptions.get(INDEX_ANALYZED_OPTION));
+                isAnalyzed = Boolean.parseBoolean(indexOptions.get(INDEX_ANALYZED_OPTION));
             }
         }
         catch (ClassNotFoundException e)
         {
-            // should not happen as we already validated we could instantiate an instance in validateOptions()
+            // should not happen as we already validated we could instantiate an instance in validateAnalyzer()
             logger.error("Failed to find specified analyzer class [{}]. Falling back to default analyzer",
                          indexOptions.get(INDEX_ANALYZER_CLASS_OPTION));
         }
@@ -154,11 +179,11 @@ public class IndexMode
 
             isLiteral = literalOption == null
                             ? (validator instanceof UTF8Type || validator instanceof AsciiType)
-                            : Boolean.valueOf(literalOption);
+                            : Boolean.parseBoolean(literalOption);
         }
         catch (Exception e)
         {
-            logger.error("failed to parse {} option, defaulting to 'false' for {} index.", INDEX_IS_LITERAL_OPTION, config.get().name);
+            logger.error("failed to parse {} option, defaulting to 'false'.", INDEX_IS_LITERAL_OPTION);
         }
 
         Long maxMemMb = indexOptions.get(INDEX_MAX_FLUSH_MEMORY_OPTION) == null
@@ -170,6 +195,6 @@ public class IndexMode
 
     public boolean supports(Op operator)
     {
-        return !(isLiteral && operator == Op.RANGE) && mode.supports(operator);
+        return mode.supports(operator);
     }
 }

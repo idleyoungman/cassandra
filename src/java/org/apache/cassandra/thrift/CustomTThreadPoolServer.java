@@ -75,13 +75,16 @@ public class CustomTThreadPoolServer extends TServer
     private final TThreadPoolServer.Args args;
 
     //Track and Limit the number of connected clients
-    private final AtomicInteger activeClients = new AtomicInteger(0);
+    private final AtomicInteger activeClients;
 
 
-    public CustomTThreadPoolServer(TThreadPoolServer.Args args, ExecutorService executorService) {
+    public CustomTThreadPoolServer(TThreadPoolServer.Args args, ExecutorService executorService)
+    {
         super(args);
         this.executorService = executorService;
+        this.stopped = false;
         this.args = args;
+        this.activeClients = new AtomicInteger(0);
     }
 
     @SuppressWarnings("resource")
@@ -97,7 +100,6 @@ public class CustomTThreadPoolServer extends TServer
             return;
         }
 
-        stopped = false;
         while (!stopped)
         {
             // block until we are under max clients
@@ -245,7 +247,7 @@ public class CustomTThreadPoolServer extends TServer
                 if (clientEnc.enabled)
                 {
                     logger.info("enabling encrypted thrift connections between client and server");
-                    TSSLTransportParameters params = new TSSLTransportParameters(clientEnc.protocol, clientEnc.cipher_suites);
+                    TSSLTransportParameters params = new TSSLTransportParameters(clientEnc.protocol, new String[0]);
                     params.setKeyStore(clientEnc.keystore, clientEnc.keystore_password);
                     if (clientEnc.require_client_auth)
                     {
@@ -254,8 +256,9 @@ public class CustomTThreadPoolServer extends TServer
                     }
                     TServerSocket sslServer = TSSLTransportFactory.getServerSocket(addr.getPort(), 0, addr.getAddress(), params);
                     SSLServerSocket sslServerSocket = (SSLServerSocket) sslServer.getServerSocket();
-                    sslServerSocket.setEnabledProtocols(SSLFactory.ACCEPTED_PROTOCOLS);
-                    serverTransport = new TCustomServerSocket(sslServer.getServerSocket(), args.keepAlive, args.sendBufferSize, args.recvBufferSize);
+                    String[] suites = SSLFactory.filterCipherSuites(sslServerSocket.getSupportedCipherSuites(), clientEnc.cipher_suites);
+                    sslServerSocket.setEnabledCipherSuites(suites);
+                    serverTransport = new TCustomServerSocket(sslServerSocket, args.keepAlive, args.sendBufferSize, args.recvBufferSize);
                 }
                 else
                 {

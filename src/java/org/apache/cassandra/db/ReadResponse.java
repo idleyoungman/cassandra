@@ -32,12 +32,14 @@ import org.apache.cassandra.db.filter.ColumnFilter;
 import org.apache.cassandra.db.rows.*;
 import org.apache.cassandra.db.partitions.*;
 import org.apache.cassandra.dht.*;
+import org.apache.cassandra.io.ForwardingVersionedSerializer;
 import org.apache.cassandra.io.IVersionedSerializer;
 import org.apache.cassandra.io.util.DataInputBuffer;
 import org.apache.cassandra.io.util.DataInputPlus;
 import org.apache.cassandra.io.util.DataOutputPlus;
 import org.apache.cassandra.io.util.DataOutputBuffer;
 import org.apache.cassandra.net.MessagingService;
+import org.apache.cassandra.thrift.ThriftResultsMerger;
 import org.apache.cassandra.utils.ByteBufferUtil;
 import org.apache.cassandra.utils.FBUtilities;
 
@@ -45,11 +47,20 @@ public abstract class ReadResponse
 {
     // Serializer for single partition read response
     public static final IVersionedSerializer<ReadResponse> serializer = new Serializer();
-    // Serializer for partition range read response (this actually delegate to 'serializer' in 3.0 and to
-    // 'legacyRangeSliceReplySerializer' in older version.
-    public static final IVersionedSerializer<ReadResponse> rangeSliceSerializer = new RangeSliceSerializer();
     // Serializer for the pre-3.0 rang slice responses.
     public static final IVersionedSerializer<ReadResponse> legacyRangeSliceReplySerializer = new LegacyRangeSliceReplySerializer();
+    // Serializer for partition range read response (this actually delegate to 'serializer' in 3.0 and to
+    // 'legacyRangeSliceReplySerializer' in older version.
+    public static final IVersionedSerializer<ReadResponse> rangeSliceSerializer = new ForwardingVersionedSerializer<ReadResponse>()
+    {
+        @Override
+        protected IVersionedSerializer<ReadResponse> delegate(int version)
+        {
+            return version < MessagingService.VERSION_30
+                    ? legacyRangeSliceReplySerializer
+                    : serializer;
+        }
+    };
 
     // This is used only when serializing data responses and we can't it easily in other cases. So this can be null, which is slighly
     // hacky, but as this hack doesn't escape this class, and it's easy enough to validate that it's not null when we need, it's "good enough".
@@ -80,6 +91,48 @@ public abstract class ReadResponse
     public abstract ByteBuffer digest(ReadCommand command);
 
     public abstract boolean isDigestResponse();
+
+    /**
+     * Creates a string of the requested partition in this read response suitable for debugging.
+     */
+    public String toDebugString(ReadCommand command, DecoratedKey key)
+    {
+        if (isDigestResponse())
+            return "Digest:0x" + ByteBufferUtil.bytesToHex(digest(command));
+
+        try (UnfilteredPartitionIterator iter = makeIterator(command))
+        {
+            while (iter.hasNext())
+            {
+                try (UnfilteredRowIterator partition = iter.next())
+                {
+                    if (partition.partitionKey().equals(key))
+                        return toDebugString(partition, command.metadata());
+                }
+            }
+        }
+        return "<key " + key + " not found>";
+    }
+
+    private String toDebugString(UnfilteredRowIterator partition, CFMetaData metadata)
+    {
+        StringBuilder sb = new StringBuilder();
+
+        sb.append(String.format("[%s.%s] key=%s partition_deletion=%s columns=%s",
+                                metadata.ksName,
+                                metadata.cfName,
+                                metadata.getKeyValidator().getString(partition.partitionKey().getKey()),
+                                partition.partitionLevelDeletion(),
+                                partition.columns()));
+
+        if (partition.staticRow() != Rows.EMPTY_STATIC_ROW)
+            sb.append("\n    ").append(partition.staticRow().toString(metadata, true));
+
+        while (partition.hasNext())
+            sb.append("\n    ").append(partition.next().toString(metadata, true));
+
+        return sb.toString();
+    }
 
     protected static ByteBuffer makeDigest(UnfilteredPartitionIterator iterator, ReadCommand command)
     {
@@ -269,12 +322,15 @@ public abstract class ReadResponse
 
                     ClusteringIndexFilter filter = command.clusteringIndexFilter(partition.partitionKey());
 
-                    // Pre-3.0, we didn't have a way to express exclusivity for non-composite comparators, so all slices were
-                    // inclusive on both ends. If we have exclusive slice ends, we need to filter the results here.
-                    if (!command.metadata().isCompound())
-                        return partition.unfilteredIterator(command.columnFilter(), filter.getSlices(command.metadata()), filter.isReversed());
+                    // Pre-3.0, we would always request one more row than we actually needed and the command-level "start" would
+                    // be the last-returned cell name, so the response would always include it.
+                    UnfilteredRowIterator iterator = partition.unfilteredIterator(command.columnFilter(), filter.getSlices(command.metadata()), filter.isReversed());
 
-                    return partition.unfilteredIterator(command.columnFilter(), Slices.ALL, filter.isReversed());
+                    // Wrap results with a ThriftResultMerger only if they're intended for the thrift command.
+                    if (command.isForThrift())
+                        return ThriftResultsMerger.maybeWrap(iterator, command.nowInSec());
+                    else
+                        return iterator;
                 }
             };
         }
@@ -363,7 +419,7 @@ public abstract class ReadResponse
             if (digest.hasRemaining())
                 return new DigestResponse(digest);
 
-            assert version == MessagingService.VERSION_30;
+            assert version >= MessagingService.VERSION_30;
             ByteBuffer data = ByteBufferUtil.readWithVIntLength(in);
             return new RemoteDataResponse(data);
         }
@@ -398,38 +454,14 @@ public abstract class ReadResponse
             long size = ByteBufferUtil.serializedSizeWithVIntLength(digest);
             if (!isDigest)
             {
-                // Note that we can only get there if version == 3.0, which is the current_version. When we'll change the
-                // version, we'll have to deserialize/re-serialize the data to be in the proper version.
-                assert version == MessagingService.VERSION_30;
+                // In theory, we should deserialize/re-serialize if the version asked is different from the current
+                // version as the content could have a different serialization format. So far though, we haven't made
+                // change to partition iterators serialization since 3.0 so we skip this.
+                assert version >= MessagingService.VERSION_30;
                 ByteBuffer data = ((DataResponse)response).data;
                 size += ByteBufferUtil.serializedSizeWithVIntLength(data);
             }
             return size;
-        }
-    }
-
-    private static class RangeSliceSerializer implements IVersionedSerializer<ReadResponse>
-    {
-        public void serialize(ReadResponse response, DataOutputPlus out, int version) throws IOException
-        {
-            if (version < MessagingService.VERSION_30)
-                legacyRangeSliceReplySerializer.serialize(response, out, version);
-            else
-                serializer.serialize(response, out, version);
-        }
-
-        public ReadResponse deserialize(DataInputPlus in, int version) throws IOException
-        {
-            return version < MessagingService.VERSION_30
-                 ? legacyRangeSliceReplySerializer.deserialize(in, version)
-                 : serializer.deserialize(in, version);
-        }
-
-        public long serializedSize(ReadResponse response, int version)
-        {
-            return version < MessagingService.VERSION_30
-                 ? legacyRangeSliceReplySerializer.serializedSize(response, version)
-                 : serializer.serializedSize(response, version);
         }
     }
 
@@ -474,6 +506,8 @@ public abstract class ReadResponse
 
         public ReadResponse deserialize(DataInputPlus in, int version) throws IOException
         {
+            assert version < MessagingService.VERSION_30;
+
             int partitionCount = in.readInt();
             ArrayList<ImmutableBTreePartition> partitions = new ArrayList<>(partitionCount);
             for (int i = 0; i < partitionCount; i++)

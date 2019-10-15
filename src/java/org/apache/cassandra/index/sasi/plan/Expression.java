@@ -31,6 +31,7 @@ import org.apache.cassandra.index.sasi.utils.TypeUtil;
 import org.apache.cassandra.db.marshal.AbstractType;
 import org.apache.cassandra.db.marshal.UTF8Type;
 import org.apache.cassandra.utils.ByteBufferUtil;
+import org.apache.cassandra.utils.FBUtilities;
 
 import org.apache.commons.lang3.builder.HashCodeBuilder;
 
@@ -46,7 +47,7 @@ public class Expression
 
     public enum Op
     {
-        EQ, PREFIX, SUFFIX, CONTAINS, NOT_EQ, RANGE;
+        EQ, MATCH, PREFIX, SUFFIX, CONTAINS, NOT_EQ, RANGE;
 
         public static Op valueOf(Operator operator)
         {
@@ -72,6 +73,9 @@ public class Expression
 
                 case LIKE_CONTAINS:
                     return CONTAINS;
+
+                case LIKE_MATCHES:
+                    return MATCH;
 
                 default:
                     throw new IllegalArgumentException("unknown operator: " + operator);
@@ -140,6 +144,7 @@ public class Expression
             case LIKE_PREFIX:
             case LIKE_SUFFIX:
             case LIKE_CONTAINS:
+            case LIKE_MATCHES:
             case EQ:
                 lower = new Bound(value, true);
                 upper = lower;
@@ -161,17 +166,30 @@ public class Expression
                 break;
 
             case LTE:
-                upperInclusive = true;
+                if (index.getDefinition().isReversedType())
+                    lowerInclusive = true;
+                else
+                    upperInclusive = true;
             case LT:
                 operation = Op.RANGE;
-                upper = new Bound(value, upperInclusive);
+                if (index.getDefinition().isReversedType())
+                    lower = new Bound(value, lowerInclusive);
+                else
+                    upper = new Bound(value, upperInclusive);
                 break;
 
             case GTE:
-                lowerInclusive = true;
+                if (index.getDefinition().isReversedType())
+                    upperInclusive = true;
+                else
+                    lowerInclusive = true;
             case GT:
                 operation = Op.RANGE;
-                lower = new Bound(value, lowerInclusive);
+                if (index.getDefinition().isReversedType())
+                    upper = new Bound(value, upperInclusive);
+                else
+                    lower = new Bound(value, lowerInclusive);
+
                 break;
         }
 
@@ -191,10 +209,10 @@ public class Expression
             int size = value.remaining();
             if ((value = TypeUtil.tryUpcast(value, validator)) == null)
             {
-                logger.error("Can't cast value for {} to size accepted by {}, value size is {} bytes.",
+                logger.error("Can't cast value for {} to size accepted by {}, value size is {}.",
                              index.getColumnName(),
                              validator,
-                             size);
+                             FBUtilities.prettyPrintMemory(size));
                 return false;
             }
         }
@@ -262,6 +280,7 @@ public class Expression
             switch (operation)
             {
                 case EQ:
+                case MATCH:
                 // Operation.isSatisfiedBy handles conclusion on !=,
                 // here we just need to make sure that term matched it
                 case NOT_EQ:
@@ -372,7 +391,6 @@ public class Expression
                 && Objects.equals(upper, o.upper)
                 && exclusions.equals(o.exclusions);
     }
-
 
     public static class Bound
     {

@@ -72,7 +72,9 @@ public class ClusteringIndexNamesFilter extends AbstractClusteringIndexFilter
 
     public boolean selectsAllPartition()
     {
-        return false;
+        // if the clusterings set is empty we are selecting a static row and in this case we want to count
+        // static rows so we return true
+        return clusterings.isEmpty();
     }
 
     public boolean selects(Clustering clustering)
@@ -136,7 +138,9 @@ public class ClusteringIndexNamesFilter extends AbstractClusteringIndexFilter
 
     public UnfilteredRowIterator getUnfilteredRowIterator(final ColumnFilter columnFilter, final Partition partition)
     {
+        final Iterator<Clustering> clusteringIter = clusteringsInQueryOrder.iterator();
         final SearchIterator<Clustering, Row> searcher = partition.searchIterator(columnFilter, reversed);
+
         return new AbstractUnfilteredRowIterator(partition.metadata(),
                                         partition.partitionKey(),
                                         partition.partitionLevelDeletion(),
@@ -145,11 +149,9 @@ public class ClusteringIndexNamesFilter extends AbstractClusteringIndexFilter
                                         reversed,
                                         partition.stats())
         {
-            private final Iterator<Clustering> clusteringIter = clusteringsInQueryOrder.iterator();
-
             protected Unfiltered computeNext()
             {
-                while (clusteringIter.hasNext() && searcher.hasNext())
+                while (clusteringIter.hasNext())
                 {
                     Row row = searcher.next(clusteringIter.next());
                     if (row != null)

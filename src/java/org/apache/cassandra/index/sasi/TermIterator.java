@@ -23,7 +23,10 @@ import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
+import io.netty.util.concurrent.FastThreadLocal;
+import org.apache.cassandra.concurrent.NamedThreadFactory;
 import org.apache.cassandra.config.DatabaseDescriptor;
+import org.apache.cassandra.index.sasi.disk.OnDiskIndexBuilder;
 import org.apache.cassandra.index.sasi.disk.Token;
 import org.apache.cassandra.index.sasi.plan.Expression;
 import org.apache.cassandra.index.sasi.utils.RangeUnionIterator;
@@ -40,7 +43,7 @@ public class TermIterator extends RangeIterator<Long, Token>
 {
     private static final Logger logger = LoggerFactory.getLogger(TermIterator.class);
 
-    private static final ThreadLocal<ExecutorService> SEARCH_EXECUTOR = new ThreadLocal<ExecutorService>()
+    private static final FastThreadLocal<ExecutorService> SEARCH_EXECUTOR = new FastThreadLocal<ExecutorService>()
     {
         public ExecutorService initialValue()
         {
@@ -57,7 +60,7 @@ public class TermIterator extends RangeIterator<Long, Token>
 
                 public Thread newThread(Runnable task)
                 {
-                    return new Thread(task, currentThread + "-SEARCH-" + count.incrementAndGet()) {{ setDaemon(true); }};
+                    return NamedThreadFactory.createThread(task, currentThread + "-SEARCH-" + count.incrementAndGet(), true);
                 }
             });
         }
@@ -79,6 +82,7 @@ public class TermIterator extends RangeIterator<Long, Token>
         this.referencedIndexes = referencedIndexes;
     }
 
+    @SuppressWarnings("resource")
     public static TermIterator build(final Expression e, Set<SSTableIndex> perSSTableIndexes)
     {
         final List<RangeIterator<Long, Token>> tokens = new CopyOnWriteArrayList<>();
@@ -100,6 +104,14 @@ public class TermIterator extends RangeIterator<Long, Token>
 
             for (final SSTableIndex index : perSSTableIndexes)
             {
+                if (e.getOp() == Expression.Op.PREFIX &&
+                    index.mode() == OnDiskIndexBuilder.Mode.CONTAINS && !index.hasMarkedPartials())
+                    throw new UnsupportedOperationException(String.format("The index %s has not yet been upgraded " +
+                                                                          "to support prefix queries in CONTAINS mode. " +
+                                                                          "Wait for compaction or rebuild the index.",
+                                                                          index.getPath()));
+
+
                 if (!index.reference())
                 {
                     latch.countDown();
@@ -145,7 +157,7 @@ public class TermIterator extends RangeIterator<Long, Token>
             e.checkpoint();
 
             RangeIterator<Long, Token> ranges = RangeUnionIterator.build(tokens);
-            return ranges == null ? null : new TermIterator(e, ranges, referencedIndexes);
+            return new TermIterator(e, ranges, referencedIndexes);
         }
         catch (Throwable ex)
         {

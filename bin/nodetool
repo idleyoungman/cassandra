@@ -23,11 +23,12 @@ if [ "`basename "$0"`" = 'nodeprobe' ]; then
 fi
 
 if [ "x$CASSANDRA_INCLUDE" = "x" ]; then
-    for include in /usr/share/cassandra/cassandra.in.sh \
-                   /usr/local/share/cassandra/cassandra.in.sh \
-                   /opt/cassandra/cassandra.in.sh \
+    # Locations (in order) to use when searching for an include file.
+    for include in "`dirname "$0"`/cassandra.in.sh" \
                    "$HOME/.cassandra.in.sh" \
-                   "`dirname "$0"`/cassandra.in.sh"; do
+                   /usr/share/cassandra/cassandra.in.sh \
+                   /usr/local/share/cassandra/cassandra.in.sh \
+                   /opt/cassandra/cassandra.in.sh; do
         if [ -r "$include" ]; then
             . "$include"
             break
@@ -57,7 +58,9 @@ fi
 # Run cassandra-env.sh to pick up JMX_PORT
 if [ -f "$CASSANDRA_CONF/cassandra-env.sh" ]; then
     JVM_OPTS_SAVE=$JVM_OPTS
+    MAX_HEAP_SIZE_SAVE=$MAX_HEAP_SIZE
     . "$CASSANDRA_CONF/cassandra-env.sh"
+    MAX_HEAP_SIZE=$MAX_HEAP_SIZE_SAVE
     JVM_OPTS=$JVM_OPTS_SAVE
 fi
 
@@ -103,6 +106,7 @@ if [ "x$MAX_HEAP_SIZE" = "x" ]; then
 fi
 
 "$JAVA" $JAVA_AGENT -ea -cp "$CLASSPATH" $JVM_OPTS -Xmx$MAX_HEAP_SIZE \
+        -XX:ParallelGCThreads=1 \
         -Dcassandra.storagedir="$cassandra_storagedir" \
         -Dlogback.configurationFile=logback-tools.xml \
         $JVM_ARGS \

@@ -19,8 +19,8 @@ package org.apache.cassandra.index.sasi.conf.view;
 
 import java.nio.ByteBuffer;
 import java.util.*;
+import java.util.stream.Collectors;
 
-import org.apache.cassandra.db.marshal.UUIDType;
 import org.apache.cassandra.index.sasi.SSTableIndex;
 import org.apache.cassandra.index.sasi.conf.ColumnIndex;
 import org.apache.cassandra.index.sasi.plan.Expression;
@@ -33,7 +33,6 @@ import org.apache.cassandra.utils.Interval;
 import org.apache.cassandra.utils.IntervalTree;
 
 import com.google.common.collect.Iterables;
-import com.google.common.collect.Sets;
 
 public class View implements Iterable<SSTableIndex>
 {
@@ -61,10 +60,15 @@ public class View implements Iterable<SSTableIndex>
                                             : new RangeTermTree.Builder(index.getMode().mode, validator);
 
         List<Interval<Key, SSTableIndex>> keyIntervals = new ArrayList<>();
-        for (SSTableIndex sstableIndex : Iterables.concat(currentView, newIndexes))
+        // Ensure oldSSTables and newIndexes are disjoint (in index redistribution case the intersection can be non-empty).
+        // also favor newIndexes over currentView in case an SSTable has been re-opened (also occurs during redistribution)
+        // See CASSANDRA-14055
+        Collection<SSTableReader> toRemove = new HashSet<>(oldSSTables);
+        toRemove.removeAll(newIndexes.stream().map(SSTableIndex::getSSTable).collect(Collectors.toSet()));
+        for (SSTableIndex sstableIndex : Iterables.concat(newIndexes, currentView))
         {
             SSTableReader sstable = sstableIndex.getSSTable();
-            if (oldSSTables.contains(sstable) || sstable.isMarkedCompacted() || newView.containsKey(sstable.descriptor))
+            if (toRemove.contains(sstable) || sstable.isMarkedCompacted() || newView.containsKey(sstable.descriptor))
             {
                 sstableIndex.release();
                 continue;
@@ -87,9 +91,9 @@ public class View implements Iterable<SSTableIndex>
             throw new IllegalStateException(String.format("mismatched sizes for intervals tree for keys vs terms: %d != %d", keyIntervalTree.intervalCount(), termTree.intervalCount()));
     }
 
-    public Set<SSTableIndex> match(final Set<SSTableReader> scope, Expression expression)
+    public Set<SSTableIndex> match(Expression expression)
     {
-        return Sets.filter(termTree.search(expression), index -> scope.contains(index.getSSTable()));
+        return termTree.search(expression);
     }
 
     public List<SSTableIndex> match(ByteBuffer minKey, ByteBuffer maxKey)

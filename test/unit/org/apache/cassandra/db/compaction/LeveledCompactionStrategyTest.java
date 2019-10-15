@@ -18,6 +18,7 @@
 package org.apache.cassandra.db.compaction;
 
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
@@ -41,6 +42,7 @@ import org.apache.cassandra.SchemaLoader;
 import org.apache.cassandra.Util;
 import org.apache.cassandra.UpdateBuilder;
 import org.apache.cassandra.db.ColumnFamilyStore;
+import org.apache.cassandra.db.DecoratedKey;
 import org.apache.cassandra.db.Keyspace;
 import org.apache.cassandra.dht.Range;
 import org.apache.cassandra.dht.Token;
@@ -74,7 +76,11 @@ public class LeveledCompactionStrategyTest
     @BeforeClass
     public static void defineSchema() throws ConfigurationException
     {
+        // Disable tombstone histogram rounding for tests
+        System.setProperty("cassandra.streaminghistogram.roundseconds", "1");
+
         SchemaLoader.prepareServer();
+
         SchemaLoader.createKeyspace(KEYSPACE1,
                                     KeyspaceParams.simple(1),
                                     SchemaLoader.standardCFMD(KEYSPACE1, CF_STANDARDDLEVELED)
@@ -187,7 +193,7 @@ public class LeveledCompactionStrategyTest
         Range<Token> range = new Range<>(Util.token(""), Util.token(""));
         int gcBefore = keyspace.getColumnFamilyStore(CF_STANDARDDLEVELED).gcBefore(FBUtilities.nowInSeconds());
         UUID parentRepSession = UUID.randomUUID();
-        ActiveRepairService.instance.registerParentRepairSession(parentRepSession, Arrays.asList(cfs), Arrays.asList(range), false, System.currentTimeMillis(), true);
+        ActiveRepairService.instance.registerParentRepairSession(parentRepSession, FBUtilities.getBroadcastAddress(), Arrays.asList(cfs), Arrays.asList(range), false, System.currentTimeMillis(), true);
         RepairJobDesc desc = new RepairJobDesc(parentRepSession, UUID.randomUUID(), KEYSPACE1, CF_STANDARDDLEVELED, Arrays.asList(range));
         Validator validator = new Validator(desc, FBUtilities.getBroadcastAddress(), gcBefore);
         CompactionManager.instance.submitValidation(cfs, validator).get();
@@ -196,15 +202,34 @@ public class LeveledCompactionStrategyTest
     /**
      * wait for leveled compaction to quiesce on the given columnfamily
      */
-    private void waitForLeveling(ColumnFamilyStore cfs) throws InterruptedException
+    public static void waitForLeveling(ColumnFamilyStore cfs) throws InterruptedException
     {
-        CompactionStrategyManager strategy = cfs.getCompactionStrategyManager();
-        // L0 is the lowest priority, so when that's done, we know everything is done
-        while (strategy.getSSTableCountPerLevel()[0] > 1)
+        CompactionStrategyManager strategyManager = cfs.getCompactionStrategyManager();
+        while (true)
+        {
+            // since we run several compaction strategies we wait until L0 in all strategies is empty and
+            // atleast one L1+ is non-empty. In these tests we always run a single data directory with only unrepaired data
+            // so it should be good enough
+            boolean allL0Empty = true;
+            boolean anyL1NonEmpty = false;
+            for (List<AbstractCompactionStrategy> strategies : strategyManager.getStrategies())
+            {
+                for (AbstractCompactionStrategy strategy : strategies)
+                {
+                    if (!(strategy instanceof LeveledCompactionStrategy))
+                        return;
+                    // note that we check > 1 here, if there is too little data in L0, we don't compact it up to L1
+                    if (((LeveledCompactionStrategy)strategy).getLevelSize(0) > 1)
+                        allL0Empty = false;
+                    for (int i = 1; i < 5; i++)
+                        if (((LeveledCompactionStrategy)strategy).getLevelSize(i) > 0)
+                            anyL1NonEmpty = true;
+                }
+            }
+            if (allL0Empty && anyL1NonEmpty)
+                return;
             Thread.sleep(100);
-
-        // in AbstractCompationStrategy.replaceSSTables() first we remove and then we add sstables so wait a little bit longer
-        Thread.sleep(10);
+        }
     }
 
     @Test
@@ -348,5 +373,111 @@ public class LeveledCompactionStrategyTest
         manager.handleNotification(new SSTableAddedNotification(singleton(sstable2)), this);
         assertTrue(unrepaired.manifest.getLevel(1).contains(sstable2));
         assertFalse(repaired.manifest.getLevel(1).contains(sstable2));
+    }
+
+
+
+    @Test
+    public void testTokenRangeCompaction() throws Exception
+    {
+        // Remove any existing data so we can start out clean with predictable number of sstables
+        cfs.truncateBlocking();
+
+        // Disable auto compaction so cassandra does not compact
+        CompactionManager.instance.disableAutoCompaction();
+
+        ByteBuffer value = ByteBuffer.wrap(new byte[100 * 1024]); // 100 KB value, make it easy to have multiple files
+
+        DecoratedKey key1 = Util.dk(String.valueOf(1));
+        DecoratedKey key2 = Util.dk(String.valueOf(2));
+        List<DecoratedKey> keys = new ArrayList<>(Arrays.asList(key1, key2));
+        int numIterations = 10;
+        int columns = 2;
+
+        // Add enough data to trigger multiple sstables.
+
+        // create 10 sstables that contain data for both key1 and key2
+        for (int i = 0; i < numIterations; i++) {
+            for (DecoratedKey key : keys) {
+                UpdateBuilder update = UpdateBuilder.create(cfs.metadata, key);
+                for (int c = 0; c < columns; c++)
+                    update.newRow("column" + c).add("val", value);
+                update.applyUnsafe();
+            }
+            cfs.forceBlockingFlush();
+        }
+
+        // create 20 more sstables with 10 containing data for key1 and other 10 containing data for key2
+        for (int i = 0; i < numIterations; i++) {
+            for (DecoratedKey key : keys) {
+                UpdateBuilder update = UpdateBuilder.create(cfs.metadata, key);
+                for (int c = 0; c < columns; c++)
+                    update.newRow("column" + c).add("val", value);
+                update.applyUnsafe();
+                cfs.forceBlockingFlush();
+            }
+        }
+
+        // We should have a total of 30 sstables by now
+        assertEquals(30, cfs.getLiveSSTables().size());
+
+        // Compact just the tables with key2
+        // Bit hackish to use the key1.token as the prior key but works in BytesToken
+        Range<Token> tokenRange = new Range<>(key2.getToken(), key2.getToken());
+        Collection<Range<Token>> tokenRanges = new ArrayList<>(Arrays.asList(tokenRange));
+        cfs.forceCompactionForTokenRange(tokenRanges);
+
+        while(CompactionManager.instance.isCompacting(Arrays.asList(cfs))) {
+            Thread.sleep(100);
+        }
+
+        // 20 tables that have key2 should have been compacted in to 1 table resulting in 11 (30-20+1)
+        assertEquals(11, cfs.getLiveSSTables().size());
+
+        // Compact just the tables with key1. At this point all 11 tables should have key1
+        Range<Token> tokenRange2 = new Range<>(key1.getToken(), key1.getToken());
+        Collection<Range<Token>> tokenRanges2 = new ArrayList<>(Arrays.asList(tokenRange2));
+        cfs.forceCompactionForTokenRange(tokenRanges2);
+
+
+        while(CompactionManager.instance.isCompacting(Arrays.asList(cfs))) {
+            Thread.sleep(100);
+        }
+
+        // the 11 tables containing key1 should all compact to 1 table
+        assertEquals(1, cfs.getLiveSSTables().size());
+    }
+
+    @Test
+    public void testCompactionCandidateOrdering() throws Exception
+    {
+        // add some data
+        byte [] b = new byte[100 * 1024];
+        new Random().nextBytes(b);
+        ByteBuffer value = ByteBuffer.wrap(b);
+        int rows = 4;
+        int columns = 10;
+        // Just keep sstables in L0 for this test
+        cfs.disableAutoCompaction();
+        for (int r = 0; r < rows; r++)
+        {
+            UpdateBuilder update = UpdateBuilder.create(cfs.metadata, String.valueOf(r));
+            for (int c = 0; c < columns; c++)
+                update.newRow("column" + c).add("val", value);
+            update.applyUnsafe();
+            cfs.forceBlockingFlush();
+        }
+        LeveledCompactionStrategy strategy = (LeveledCompactionStrategy) (cfs.getCompactionStrategyManager()).getStrategies().get(1).get(0);
+        // get readers for level 0 sstables
+        Collection<SSTableReader> sstables = strategy.manifest.getLevel(0);
+        Collection<SSTableReader> sortedCandidates = strategy.manifest.ageSortedSSTables(sstables);
+        assertTrue(String.format("More than 1 sstable required for test, found: %d .", sortedCandidates.size()), sortedCandidates.size() > 1);
+        long lastMaxTimeStamp = Long.MIN_VALUE;
+        for (SSTableReader sstable : sortedCandidates)
+        {
+            assertTrue(String.format("SStables not sorted into oldest to newest by maxTimestamp. Current sstable: %d , last sstable: %d", sstable.getMaxTimestamp(), lastMaxTimeStamp),
+                       sstable.getMaxTimestamp() > lastMaxTimeStamp);
+            lastMaxTimeStamp = sstable.getMaxTimestamp();
+        }
     }
 }

@@ -24,11 +24,13 @@ import java.util.concurrent.locks.LockSupport;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import io.netty.util.concurrent.FastThreadLocalThread;
 import org.apache.cassandra.utils.JVMStabilityInspector;
 
 final class SEPWorker extends AtomicReference<SEPWorker.Work> implements Runnable
 {
     private static final Logger logger = LoggerFactory.getLogger(SEPWorker.class);
+    private static final boolean SET_THREAD_NAME = Boolean.parseBoolean(System.getProperty("cassandra.set_sep_thread_name", "true"));
 
     final Long workerId;
     final Thread thread;
@@ -45,7 +47,7 @@ final class SEPWorker extends AtomicReference<SEPWorker.Work> implements Runnabl
     {
         this.pool = pool;
         this.workerId = workerId;
-        thread = new Thread(this, pool.poolName + "-Worker-" + workerId);
+        thread = new FastThreadLocalThread(this, pool.poolName + "-Worker-" + workerId);
         thread.setDaemon(true);
         set(initialState);
         thread.start();
@@ -71,9 +73,14 @@ final class SEPWorker extends AtomicReference<SEPWorker.Work> implements Runnabl
         {
             while (true)
             {
+                if (pool.shuttingDown)
+                    return;
+
                 if (isSpinning() && !selfAssign())
                 {
                     doWaitSpin();
+                    // if the pool is terminating, but we have been assigned STOP_SIGNALLED, if we do not re-check
+                    // whether the pool is shutting down this thread will go to sleep and block forever
                     continue;
                 }
 
@@ -88,6 +95,8 @@ final class SEPWorker extends AtomicReference<SEPWorker.Work> implements Runnabl
                 assigned = get().assigned;
                 if (assigned == null)
                     continue;
+                if (SET_THREAD_NAME)
+                    Thread.currentThread().setName(assigned.name + "-" + workerId);
                 task = assigned.tasks.poll();
 
                 // if we do have tasks assigned, nobody will change our state so we can simply set it to WORKING
@@ -113,8 +122,12 @@ final class SEPWorker extends AtomicReference<SEPWorker.Work> implements Runnabl
 
                 // return our work permit, and maybe signal shutdown
                 assigned.returnWorkPermit();
-                if (shutdown && assigned.getActiveCount() == 0)
-                    assigned.shutdown.signalAll();
+                if (shutdown)
+                {
+                    if (assigned.getActiveCount() == 0)
+                        assigned.shutdown.signalAll();
+                    return;
+                }
                 assigned = null;
 
                 // try to immediately reassign ourselves some work; if we fail, start spinning
@@ -164,7 +177,11 @@ final class SEPWorker extends AtomicReference<SEPWorker.Work> implements Runnabl
 
             // if we're being descheduled, place ourselves in the descheduled collection
             if (work.isStop())
+            {
                 pool.descheduled.put(workerId, this);
+                if (pool.shuttingDown)
+                    return true;
+            }
 
             // if we're currently stopped, and the new state is not a stop signal
             // (which we can immediately convert to stopped), unpark the worker

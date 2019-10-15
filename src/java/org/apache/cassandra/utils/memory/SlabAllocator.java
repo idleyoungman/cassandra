@@ -31,9 +31,9 @@ import org.apache.cassandra.utils.concurrent.OpOrder;
 import sun.nio.ch.DirectBuffer;
 
 /**
- * The SlabAllocator is a bump-the-pointer allocator that allocates
- * large (2MB by default) regions and then doles them out to threads that request
- * slices into the array.
++ * The SlabAllocator is a bump-the-pointer allocator that allocates
++ * large (1MB) global regions and then doles them out to threads that
++ * request smaller sized (up to 128kb) slices into the array.
  * <p></p>
  * The purpose of this class is to combat heap fragmentation in long lived
  * objects: by ensuring that all allocations with similar lifetimes
@@ -111,11 +111,6 @@ public class SlabAllocator extends MemtableBufferAllocator
             // not enough space!
             currentRegion.compareAndSet(region, null);
         }
-    }
-
-    public DataReclaimer reclaimer()
-    {
-        return NO_OP;
     }
 
     public void setDiscarded()
