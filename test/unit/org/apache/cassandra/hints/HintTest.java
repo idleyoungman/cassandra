@@ -201,7 +201,7 @@ public class HintTest
 
         // the updates should have been applied
         for (PartitionUpdate partition : mutation.getPartitionUpdates())
-            assertPartitionsEqual(partition, readPartition(key, partition.metadata().cfName));
+            assertPartitionsEqual(partition, readPartition(key, partition.metadata().cfName, partition.columns()));
     }
 
     @Test
