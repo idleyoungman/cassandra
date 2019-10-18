@@ -161,7 +161,7 @@ public class LegacyHintsMigratorTest
 
                 assertEquals(timestamp, hint.creationTime);
                 assertEquals(ttl, hint.ttl);
-                assertMutationsEqual(mutation, hint.mutation);
+                assertTrue(mutation + " != " + hint.mutation, Util.sameContent(mutation, hint.mutation));
             }
         }
     }
