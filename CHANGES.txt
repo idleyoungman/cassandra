@@ -1,3 +1,7 @@
+3.11.6-newrelic-v1
+Merged from 3.7-newrelic-v1:
+ * Add a new column family option: hint_time_to_live_seconds
+
 3.11.6
  * Fix bad UDT sstable metadata serialization headers written by C* 3.0 on upgrade and in sstablescrub (CASSANDRA-15035)
  * Fix nodetool compactionstats showing extra pending task for TWCS - patch implemented (CASSANDRA-15409)
